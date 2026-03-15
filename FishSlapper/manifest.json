@@ -1,0 +1,15 @@
+{
+   "Name": "Fish Slapper",
+   "Author": "iwyxdxl",
+   "Version": "1.0.0",
+   "Description": "Slap the fish！",
+   "UniqueID": "iwyxdxl.FishSlapper",
+   "EntryDll": "FishSlapper.dll",
+   "MinimumApiVersion": "4.0.0",
+   "Dependencies": [
+      {
+         "UniqueID": "spacechase0.GenericModConfigMenu",
+         "IsRequired": false
+      }
+   ]
+}

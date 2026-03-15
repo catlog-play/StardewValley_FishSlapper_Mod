@@ -1,0 +1,37 @@
+# Fish Slapper
+
+[English](./README.md)
+
+Fish Slapper 是一个为《星露谷物语》制作的小型 SMAPI 模组，让你在钓到鱼之后可以狠狠扇它一巴掌。
+
+## 功能
+
+- 在成功钓到鱼后扇鱼一巴掌。
+- 默认按键为 `鼠标右键` 或 `空格`。
+- 包含自定义巴掌音效、手部动画和冲击粒子特效。
+- 可选支持 Generic Mod Config Menu，用于修改按键绑定。
+- 已包含默认语言和中文的配置菜单文本。
+
+## 运行需求
+
+- 《星露谷物语》
+- [SMAPI](https://smapi.io/) 4.0.0 或更高版本
+- [Generic Mod Config Menu](https://www.nexusmods.com/stardewvalley/mods/5098)（可选）
+
+## 安装方法
+
+1. 安装 SMAPI。
+2. 下载这个 mod 的最新发布版本。
+3. 将 `FishSlapper` 文件夹解压到 `Stardew Valley/Mods` 目录中。
+
+## 开发
+
+源码位于 `FishSlapper/` 目录。
+
+```bash
+dotnet build FishSlapper/FishSlapper.sln
+```
+
+## 许可证
+
+本项目使用 MIT License，详见 `LICENSE`。

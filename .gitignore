@@ -1,0 +1,22 @@
+# Build output
+**/[Bb]in/
+**/[Oo]bj/
+
+# IDE and editor files
+.vs/
+.vscode/
+.idea/
+*.user
+*.rsuser
+*.suo
+*.userosscache
+*.sln.docstates
+*.DotSettings.user
+_ReSharper*/
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Generated mod config if the project folder is linked into the Mods directory
+/FishSlapper/config.json
