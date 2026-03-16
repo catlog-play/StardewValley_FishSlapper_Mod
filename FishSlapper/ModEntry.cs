@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using HarmonyLib;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using StardewModdingAPI;
@@ -15,6 +16,13 @@ namespace FishSlapper
         private ModConfig Config = null!;
         private readonly string SlapSoundId = "iwyxdxl.FishSlapper_SlapSound";
 
+        // 出拳帧动画
+        private int slapTick = -1;
+        private static bool hideCaughtFishPreview;
+        private const int SlapPunchFrame = 278; //272 punchDown, 274 punchRight, 276 punchUp, 278 punchLeft
+        private const int SlapDurationTicks = 30;
+
+        // 爆破粒子系统
         private Texture2D? pixelTexture;
         private readonly List<BurstParticle> burstParticles = new();
         private readonly Random rng = new();
@@ -36,8 +44,15 @@ namespace FishSlapper
         {
             this.Config = helper.ReadConfig<ModConfig>();
 
+            var harmony = new Harmony(this.ModManifest.UniqueID);
+            harmony.Patch(
+                original: AccessTools.Method(typeof(Game1), "drawTool", new[] { typeof(Farmer), typeof(int) }),
+                prefix: new HarmonyMethod(typeof(ModEntry), nameof(PrefixGame1DrawTool))
+            );
+
             helper.Events.Input.ButtonPressed += this.OnButtonPressed;
             helper.Events.Content.AssetRequested += this.OnAssetRequested;
+            helper.Events.Display.RenderingWorld += this.OnRenderingWorld;
             helper.Events.Display.RenderedWorld += this.OnRenderedWorld;
             helper.Events.GameLoop.UpdateTicked += this.OnUpdateTicked;
             helper.Events.GameLoop.GameLaunched += this.OnGameLaunched;
@@ -96,6 +111,8 @@ namespace FishSlapper
         {
             Game1.playSound(this.SlapSoundId);
             Game1.player.jump(4f);
+
+            this.slapTick = 8;
 
             Vector2 impactPos = Game1.player.Position + new Vector2(-16f, -64f);
             this.SpawnBurstParticles(impactPos);
@@ -158,8 +175,15 @@ namespace FishSlapper
 
         private void OnUpdateTicked(object? sender, UpdateTickedEventArgs e)
         {
-            if (this.burstParticles.Count == 0)
+            if (this.slapTick < 0 && this.burstParticles.Count == 0)
                 return;
+
+            if (this.slapTick >= 0)
+            {
+                this.slapTick++;
+                if (this.slapTick > SlapDurationTicks)
+                    this.slapTick = -1;
+            }
 
             foreach (var particle in this.burstParticles)
             {
@@ -172,8 +196,20 @@ namespace FishSlapper
             this.burstParticles.RemoveAll(p => p.Alpha <= 0f);
         }
 
+        // 在世界绘制前的最后一刻覆盖出拳帧
+        private void OnRenderingWorld(object? sender, RenderingWorldEventArgs e)
+        {
+            if (this.slapTick < 0)
+                return;
+
+            hideCaughtFishPreview = true;
+            Game1.player.FarmerSprite.setCurrentFrame(SlapPunchFrame);
+        }
+
         private void OnRenderedWorld(object? sender, RenderedWorldEventArgs e)
         {
+            hideCaughtFishPreview = false;
+
             if (this.pixelTexture == null)
                 return;
 
@@ -192,6 +228,21 @@ namespace FishSlapper
                     layerDepth: 1f
                 );
             }
+        }
+
+        private static bool PrefixGame1DrawTool(Farmer __0)
+        {
+            if (!hideCaughtFishPreview)
+                return true;
+
+            if (__0 != Game1.player || __0.CurrentTool is not FishingRod rod || !rod.fishCaught)
+                return true;
+
+            if (Game1.spriteBatch is null)
+                return true;
+
+            rod.draw(Game1.spriteBatch);
+            return false;
         }
     }
 }

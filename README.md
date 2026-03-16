@@ -6,11 +6,14 @@ Fish Slapper is a small SMAPI mod for Stardew Valley that lets you slap a caught
 
 ## Features
 
-- Slap a fish after catching it.
+- Slap a fish after catching it — your character performs a punch animation with a jump, impact particles, and a custom slap sound.
 - Default slap key: `Right Mouse` or `Space`.
-- Custom slap sound, hand animation, and impact particles.
 - Optional Generic Mod Config Menu support for changing the keybind.
 - Includes default and Chinese config-menu translations.
+
+## Demo
+
+![Slap The Fish demo](docs/SlapTheFish.gif)
 
 ## Requirements
 
