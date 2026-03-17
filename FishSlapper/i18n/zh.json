@@ -1,4 +1,6 @@
 {
   "config.slap-key.name": "扇鱼按键",
-  "config.slap-key.tooltip": "钓上鱼后按下此键扇鱼一巴掌。"
+  "config.slap-key.tooltip": "钓上鱼后按下此键扇鱼一巴掌。",
+  "config.dive-slap-key.name": "跳水扇鱼按键",
+  "config.dive-slap-key.tooltip": "钓鱼条出现时按下此键，触发跳水扇鱼。"
 }
