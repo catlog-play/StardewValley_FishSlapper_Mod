@@ -121,12 +121,20 @@ namespace FishSlapper
 
         private void OnRenderedWorld(object? sender, RenderedWorldEventArgs e)
         {
-            this.Renderer.OnRenderedWorld(e, this.Controller.ActiveSession);
+            string? slapKey = this.Controller.GetSlapKeyHint();
+            string? slapPrompt = slapKey is not null
+                ? this.Helper.Translation.Get("hud.slap-prompt", new { key = slapKey }).ToString()
+                : null;
+            this.Renderer.OnRenderedWorld(e, this.Controller.ActiveSession, slapPrompt);
         }
 
         private void OnRenderedActiveMenu(object? sender, RenderedActiveMenuEventArgs e)
         {
-            this.Renderer.OnRenderedActiveMenu(e, this.Controller.ActiveSession);
+            string? keyHint = this.Controller.GetDiveSlapKeyHint();
+            string? promptText = keyHint is not null
+                ? this.Helper.Translation.Get("hud.dive-slap-prompt", new { key = keyHint }).ToString()
+                : null;
+            this.Renderer.OnRenderedActiveMenu(e, this.Controller.ActiveSession, promptText);
         }
 
         private void OnMenuChanged(object? sender, MenuChangedEventArgs e)

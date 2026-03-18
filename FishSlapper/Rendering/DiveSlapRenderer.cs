@@ -45,6 +45,9 @@ namespace FishSlapper.Rendering
         private const float HudAboveFeetOffset = 160f;
         private const float HudSegmentGap = 2f;
         private const float HudTextScale = 1.1f;
+        private const float PromptPadX = 10f;
+        private const float PromptPadY = 5f;
+        private const float PromptBelowFeetOffset = 48f;
 
         private static readonly Color HudBorderColor = new(40, 30, 20, 230);
         private static readonly Color HudHitFilledColor = new(255, 200, 50);
@@ -256,7 +259,7 @@ namespace FishSlapper.Rendering
             return true;
         }
 
-        public void OnRenderedWorld(RenderedWorldEventArgs e, DiveSlapSession? session)
+        public void OnRenderedWorld(RenderedWorldEventArgs e, DiveSlapSession? session, string? slapPrompt)
         {
             if (session is null)
                 this.diveRenderFarmer = null;
@@ -281,13 +284,29 @@ namespace FishSlapper.Rendering
             }
 
             if (session is not null && session.State == DiveSlapState.Slapping)
+            {
                 this.DrawSlapProgressHud(e.SpriteBatch, session);
+                if (slapPrompt is not null)
+                {
+                    Vector2 sp = Game1.GlobalToLocal(Game1.viewport, session.RenderPosition);
+                    float cx = sp.X + 32f;
+                    this.DrawPromptBox(e.SpriteBatch, cx, sp.Y + PromptBelowFeetOffset, slapPrompt);
+                }
+            }
+            else if (session is null && slapPrompt is not null)
+            {
+                Vector2 sp = Game1.GlobalToLocal(Game1.viewport, Game1.player.Position);
+                float cx = sp.X + 32f;
+                this.DrawPromptBox(e.SpriteBatch, cx, sp.Y + PromptBelowFeetOffset, slapPrompt);
+            }
 
             this.hideCaughtFishPreview = false;
         }
 
-        public void OnRenderedActiveMenu(RenderedActiveMenuEventArgs e, DiveSlapSession? session)
+        public void OnRenderedActiveMenu(RenderedActiveMenuEventArgs e, DiveSlapSession? session, string? diveSlapPrompt)
         {
+            if (diveSlapPrompt is not null)
+                this.DrawDiveSlapPrompt(e.SpriteBatch, diveSlapPrompt);
         }
 
         private void DrawDiveSession(SpriteBatch spriteBatch, DiveSlapSession session)
@@ -607,6 +626,42 @@ namespace FishSlapper.Rendering
                 Color timeColor = GetTimeBarColor(timeFraction);
                 this.DrawHudRect(spriteBatch, barLeft, timeBarTop, fillWidth, HudTimeBarHeight, timeColor);
             }
+        }
+
+        private void DrawDiveSlapPrompt(SpriteBatch spriteBatch, string promptText)
+        {
+            this.EnsurePixelTexture();
+            if (this.pixelTexture is null)
+                return;
+
+            float zoom = Game1.options.zoomLevel;
+            Vector2 viewportOffset = Game1.player.Position - new Vector2(Game1.viewport.X, Game1.viewport.Y);
+            float uiCenterX = (viewportOffset.X + 32f) * zoom;
+            float uiFeetY = viewportOffset.Y * zoom;
+            this.DrawPromptBox(spriteBatch, uiCenterX, uiFeetY + PromptBelowFeetOffset * zoom, promptText);
+        }
+
+        private void DrawPromptBox(SpriteBatch spriteBatch, float centerX, float topY, string text)
+        {
+            this.EnsurePixelTexture();
+            if (this.pixelTexture is null)
+                return;
+
+            float pulse = (float)(0.75 + 0.25 * Math.Sin(Game1.currentGameTime.TotalGameTime.TotalMilliseconds / 400.0));
+            Vector2 textSize = Game1.smallFont.MeasureString(text);
+            float boxW = textSize.X + PromptPadX * 2f;
+            float boxH = textSize.Y + PromptPadY * 2f;
+            float boxX = centerX - boxW / 2f;
+
+            this.DrawHudRect(spriteBatch, boxX, topY, boxW, boxH, Color.Black * 0.65f);
+
+            Vector2 textPos = new(boxX + PromptPadX, topY + PromptPadY);
+            spriteBatch.DrawString(Game1.smallFont, text,
+                textPos + Vector2.One, HudTextShadowColor * pulse,
+                0f, Vector2.Zero, 1f, SpriteEffects.None, 1f);
+            spriteBatch.DrawString(Game1.smallFont, text,
+                textPos, Color.White * pulse,
+                0f, Vector2.Zero, 1f, SpriteEffects.None, 1f);
         }
 
         private void DrawHudRect(SpriteBatch spriteBatch, float x, float y, float width, float height, Color color)

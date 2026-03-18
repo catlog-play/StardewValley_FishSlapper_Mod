@@ -45,6 +45,27 @@ namespace FishSlapper.Gameplay
 
         public DiveSlapSession? ActiveSession => this.activeSession;
 
+        public string? GetDiveSlapKeyHint()
+        {
+            if (this.activeSession is not null)
+                return null;
+            if (Game1.activeClickableMenu is not BobberBar)
+                return null;
+            return this.config.DiveSlapKey.ToString();
+        }
+
+        public string? GetSlapKeyHint()
+        {
+            if (this.activeSession is not null)
+                return this.activeSession.State == DiveSlapState.Slapping
+                    ? this.config.SlapKey.ToString()
+                    : null;
+
+            return this.vanillaBridge.TryGetCaughtFishRod(out _)
+                ? this.config.SlapKey.ToString()
+                : null;
+        }
+
         public void UpdateConfig(ModConfig config)
         {
             this.config = config;
