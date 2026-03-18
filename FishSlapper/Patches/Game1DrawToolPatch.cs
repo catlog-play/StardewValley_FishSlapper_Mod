@@ -30,11 +30,12 @@ namespace FishSlapper.Patches
 
             if (Game1DrawToolPatch.controller.ShouldHideCaughtFishToolPreview(__0))
             {
+                // Ensure FishingRod.draw() still runs so our FishingRodDrawPatch can render
+                // the custom caught-fish preview while suppressing vanilla tool draw.
                 if (__0.CurrentTool is FishingRod rod && Game1.spriteBatch is not null)
-                {
                     rod.draw(Game1.spriteBatch);
-                    return false;
-                }
+
+                return false;
             }
 
             return !Game1DrawToolPatch.controller.ShouldSuppressToolDraw(__0);

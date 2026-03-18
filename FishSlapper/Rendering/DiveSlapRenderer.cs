@@ -28,6 +28,11 @@ namespace FishSlapper.Rendering
         private const int FarmerStandRightFrame = 8;
         private const int FarmerStandUpFrame = 16;
         private const int FarmerStandLeftFrame = 24;
+        private const float CaughtFishHeldBaseYOffset = -36f;
+        private const float CaughtFishMaxHorizontalTwitchVelocity = 0.8f;
+        private const float CaughtFishInitialJumpVelocity = -11.4f;
+        private const float CaughtFishBounceJumpVelocity = -4.2f;
+        private const int CaughtFishStandResetTicks = 5;
 
         private const int CaughtFishSlapDurationTicks = 30;
         private const int DiveHitAnimationDurationTicks = 10;
@@ -35,6 +40,14 @@ namespace FishSlapper.Rendering
         private readonly Random rng = new();
         private Texture2D? pixelTexture;
         private int caughtFishSlapTick = -1;
+        private float fishTwitchOffsetX;
+        private float fishTwitchOffsetY;
+        private float fishTwitchRotation;
+        private float fishTwitchRotationVelocity;
+        private float fishTwitchVelocityX;
+        private float fishTwitchVelocityY;
+        private int fishTwitchBouncesRemaining;
+        private int caughtFishStandFrameTicksRemaining;
         private int localPoseResetTicks;
         private int localPoseResetFacingDirection = 2;
         private bool hideCaughtFishPreview;
@@ -76,7 +89,15 @@ namespace FishSlapper.Rendering
         {
             Game1.playSound(ModConstants.SlapSoundId);
             Game1.player.jump(4f);
+            this.caughtFishStandFrameTicksRemaining = this.caughtFishSlapTick >= 0 ? CaughtFishStandResetTicks : 0;
             this.caughtFishSlapTick = 8;
+            this.fishTwitchOffsetX = 0f;
+            this.fishTwitchOffsetY = 0f;
+            this.fishTwitchRotation = 0f;
+            this.fishTwitchVelocityX = (float)(this.rng.NextDouble() * (CaughtFishMaxHorizontalTwitchVelocity * 2f) - CaughtFishMaxHorizontalTwitchVelocity);
+            this.fishTwitchVelocityY = CaughtFishInitialJumpVelocity;
+            this.fishTwitchRotationVelocity = this.fishTwitchVelocityX * 0.065f;
+            this.fishTwitchBouncesRemaining = 1;
             this.SpawnBurstParticles(Game1.player.Position + new Vector2(-16f, -64f));
         }
 
@@ -110,6 +131,49 @@ namespace FishSlapper.Rendering
                     this.caughtFishSlapTick = -1;
             }
 
+            if (
+                this.fishTwitchVelocityX != 0f
+                || this.fishTwitchVelocityY != 0f
+                || this.fishTwitchOffsetX != 0f
+                || this.fishTwitchOffsetY < 0f
+                || this.fishTwitchRotation != 0f
+                || this.fishTwitchRotationVelocity != 0f
+            )
+            {
+                this.fishTwitchOffsetX += this.fishTwitchVelocityX;
+                this.fishTwitchOffsetY += this.fishTwitchVelocityY;
+                this.fishTwitchRotation += this.fishTwitchRotationVelocity;
+                this.fishTwitchVelocityX *= 0.72f;
+                this.fishTwitchVelocityY += 1.1f;
+                this.fishTwitchRotationVelocity *= 0.78f;
+                if (this.fishTwitchOffsetY >= 0f)
+                {
+                    this.fishTwitchOffsetY = 0f;
+                    if (this.fishTwitchBouncesRemaining > 0)
+                    {
+                        this.fishTwitchVelocityY = CaughtFishBounceJumpVelocity;
+                        this.fishTwitchRotationVelocity = -this.fishTwitchRotationVelocity * 0.6f;
+                        this.fishTwitchBouncesRemaining--;
+                    }
+                    else
+                    {
+                        this.fishTwitchVelocityY = 0f;
+                    }
+                }
+
+                if (MathF.Abs(this.fishTwitchOffsetX) < 0.05f && MathF.Abs(this.fishTwitchVelocityX) < 0.05f)
+                {
+                    this.fishTwitchOffsetX = 0f;
+                    this.fishTwitchVelocityX = 0f;
+                }
+
+                if (MathF.Abs(this.fishTwitchRotation) < 0.005f && MathF.Abs(this.fishTwitchRotationVelocity) < 0.005f)
+                {
+                    this.fishTwitchRotation = 0f;
+                    this.fishTwitchRotationVelocity = 0f;
+                }
+            }
+
             if (this.localPoseResetTicks > 0)
                 this.localPoseResetTicks--;
 
@@ -119,7 +183,7 @@ namespace FishSlapper.Rendering
             foreach (var particle in this.burstParticles)
             {
                 particle.WorldPos += particle.Velocity;
-                particle.Velocity *= 0.96f;
+                particle.Velocity *= 0.91f;
                 particle.Alpha -= particle.AlphaDecay;
                 particle.Rotation += particle.RotationSpeed;
             }
@@ -132,6 +196,13 @@ namespace FishSlapper.Rendering
             if (this.caughtFishSlapTick >= 0)
             {
                 this.hideCaughtFishPreview = true;
+                if (this.caughtFishStandFrameTicksRemaining > 0)
+                {
+                    this.caughtFishStandFrameTicksRemaining--;
+                    Game1.player.FarmerSprite.setCurrentFrame(GetStandingFrame(Game1.player.FacingDirection));
+                    return;
+                }
+
                 // 这里故意不清原版“手里举鱼”的状态，只临时覆写一帧出拳姿势。
                 // 如果把动画栈整个清掉，会把老玩法里“拿着鱼无限扇”的行为打断。
                 Game1.player.FarmerSprite.setCurrentFrame(CaughtFishPunchFrame);
@@ -153,6 +224,16 @@ namespace FishSlapper.Rendering
             }
 
             this.DrawDiveSession(spriteBatch, session);
+            return true;
+        }
+
+        public bool TryDrawCaughtFishPreview(SpriteBatch spriteBatch, Farmer farmer, StardewValley.Tools.FishingRod rod)
+        {
+            if (this.caughtFishSlapTick < 0 || !rod.fishCaught || rod.whichFish is null || rod.whichFish.TypeIdentifier != "(O)")
+                return false;
+
+            Farmer drawFarmer = rod.lastUser ?? farmer;
+            this.DrawCaughtFishPreview(spriteBatch, drawFarmer, rod);
             return true;
         }
 
@@ -217,6 +298,137 @@ namespace FishSlapper.Rendering
             {
                 this.toolSuppressedFarmer = null;
             }
+        }
+
+        private void DrawCaughtFishPreview(SpriteBatch spriteBatch, Farmer farmer, StardewValley.Tools.FishingRod rod)
+        {
+            if (rod.whichFish is null)
+                return;
+
+            float boardBobOffset = 4f * (float)Math.Round(
+                Math.Sin(Game1.currentGameTime.TotalGameTime.TotalMilliseconds / 250.0),
+                2
+            );
+            int standingPixelY = farmer.StandingPixel.Y;
+            float boardLayerDepth = standingPixelY / 10000f + 0.06f;
+            float iconLayerDepth = standingPixelY / 10000f + 0.0601f;
+            var fishData = rod.whichFish.GetParsedOrErrorData();
+            Texture2D fishTexture = fishData.GetTexture();
+            Rectangle fishSourceRect = fishData.GetSourceRect(0, null);
+
+            spriteBatch.Draw(
+                Game1.mouseCursors,
+                Game1.GlobalToLocal(Game1.viewport, farmer.Position + new Vector2(-120f, -288f + boardBobOffset)),
+                new Rectangle(31, 1870, 73, 49),
+                Color.White * 0.8f,
+                0f,
+                Vector2.Zero,
+                4f,
+                SpriteEffects.None,
+                boardLayerDepth
+            );
+
+            spriteBatch.Draw(
+                fishTexture,
+                Game1.GlobalToLocal(Game1.viewport, farmer.Position + new Vector2(-80f, -216f + boardBobOffset)),
+                fishSourceRect,
+                Color.White,
+                0f,
+                Vector2.Zero,
+                4f,
+                SpriteEffects.None,
+                iconLayerDepth
+            );
+
+            if (rod.numberOfFishCaught > 1)
+            {
+                Utility.drawTinyDigits(
+                    rod.numberOfFishCaught,
+                    spriteBatch,
+                    Game1.GlobalToLocal(Game1.viewport, farmer.Position + new Vector2(-28f, -168f + boardBobOffset)),
+                    3f,
+                    standingPixelY / 10000f + 0.061f,
+                    Color.White
+                );
+            }
+
+            this.DrawCaughtFishHeldSprite(
+                spriteBatch,
+                fishTexture,
+                fishSourceRect,
+                Game1.GlobalToLocal(
+                    Game1.viewport,
+                    farmer.Position + new Vector2(this.fishTwitchOffsetX, CaughtFishHeldBaseYOffset + this.fishTwitchOffsetY)
+                ),
+                GetHeldFishBaseRotation(rod) + this.fishTwitchRotation,
+                standingPixelY / 10000f + 0.062f
+            );
+
+            for (int i = 1; i < rod.numberOfFishCaught; i++)
+            {
+                float bonusRotation = i == 2 ? MathF.PI : 2.5132742f;
+                this.DrawCaughtFishHeldSprite(
+                    spriteBatch,
+                    fishTexture,
+                    fishSourceRect,
+                    Game1.GlobalToLocal(Game1.viewport, farmer.Position + new Vector2(-12f * i, CaughtFishHeldBaseYOffset)),
+                    GetHeldFishBaseRotation(rod) > 0f ? bonusRotation : 0f,
+                    standingPixelY / 10000f + 0.058f
+                );
+            }
+
+            string fishName = fishData.DisplayName ?? "???";
+            Vector2 fishNameSize = Game1.smallFont.MeasureString(fishName);
+            spriteBatch.DrawString(
+                Game1.smallFont,
+                fishName,
+                Game1.GlobalToLocal(
+                    Game1.viewport,
+                    farmer.Position + new Vector2(26f - fishNameSize.X / 2f, -278f + boardBobOffset)
+                ),
+                rod.bossFish ? new Color(126, 61, 237) : Game1.textColor,
+                0f,
+                Vector2.Zero,
+                1f,
+                SpriteEffects.None,
+                boardLayerDepth
+            );
+
+            if (rod.fishSize == -1)
+                return;
+
+            string sizeLabel = Game1.content.LoadString(@"Strings\StringsFromCSFiles:FishingRod.cs.14082");
+            spriteBatch.DrawString(
+                Game1.smallFont,
+                sizeLabel,
+                Game1.GlobalToLocal(Game1.viewport, farmer.Position + new Vector2(20f, -214f + boardBobOffset)),
+                Game1.textColor,
+                0f,
+                Vector2.Zero,
+                1f,
+                SpriteEffects.None,
+                boardLayerDepth
+            );
+
+            double displaySize = LocalizedContentManager.CurrentLanguageCode == LocalizedContentManager.LanguageCode.en
+                ? rod.fishSize
+                : Math.Round(rod.fishSize * 2.54);
+            string sizeText = Game1.content.LoadString(@"Strings\StringsFromCSFiles:FishingRod.cs.14083", displaySize);
+            Vector2 sizeTextSize = Game1.smallFont.MeasureString(sizeText);
+            spriteBatch.DrawString(
+                Game1.smallFont,
+                sizeText,
+                Game1.GlobalToLocal(
+                    Game1.viewport,
+                    farmer.Position + new Vector2(85f - sizeTextSize.X / 2f, -179f + boardBobOffset)
+                ),
+                rod.recordSize ? Color.Blue : Game1.textColor,
+                0f,
+                Vector2.Zero,
+                1f,
+                SpriteEffects.None,
+                boardLayerDepth
+            );
         }
 
         private Farmer PrepareDiveRenderFarmer(DiveSlapSession session)
@@ -310,12 +522,44 @@ namespace FishSlapper.Rendering
             };
         }
 
+        private static float GetHeldFishBaseRotation(StardewValley.Tools.FishingRod rod)
+        {
+            if (rod.whichFish is null || rod.fishSize == -1)
+                return 0f;
+
+            string? itemId = rod.whichFish.QualifiedItemId;
+            return itemId is not "(O)800" and not "(O)798" and not "(O)149" and not "(O)151"
+                ? 2.3561945f
+                : 0f;
+        }
+
+        private void DrawCaughtFishHeldSprite(
+            SpriteBatch spriteBatch,
+            Texture2D fishTexture,
+            Rectangle fishSourceRect,
+            Vector2 screenPosition,
+            float rotation,
+            float layerDepth
+        )
+        {
+            spriteBatch.Draw(
+                fishTexture,
+                screenPosition,
+                fishSourceRect,
+                Color.White,
+                rotation,
+                new Vector2(8f, 8f),
+                3f,
+                SpriteEffects.None,
+                layerDepth
+            );
+        }
+
         private void SpawnBurstParticles(Vector2 impactWorldPos)
         {
             this.EnsurePixelTexture();
-            this.burstParticles.Clear();
 
-            Vector2 center = impactWorldPos + new Vector2(12f, 12f);
+            Vector2 center = impactWorldPos + new Vector2(12f, 0f);
             Color[] palette = { Color.Yellow, Color.Orange, Color.White, new Color(255, 255, 100) };
 
             int sparkCount = this.rng.Next(12, 18);
@@ -331,7 +575,7 @@ namespace FishSlapper.Rendering
                         (float)(this.rng.NextDouble() * 6 - 3)),
                     Velocity = new Vector2(MathF.Cos(angle) * speed, MathF.Sin(angle) * speed),
                     Alpha = 1f,
-                    AlphaDecay = 0.013f + (float)(this.rng.NextDouble() * 0.007f),
+                    AlphaDecay = 0.03f + (float)(this.rng.NextDouble() * 0.008f),
                     Width = size,
                     Height = size,
                     Rotation = (float)(this.rng.NextDouble() * MathHelper.TwoPi),
@@ -350,9 +594,9 @@ namespace FishSlapper.Rendering
                     WorldPos = center + new Vector2(MathF.Cos(angle) * dist, MathF.Sin(angle) * dist),
                     Velocity = new Vector2(MathF.Cos(angle) * 2.4f, MathF.Sin(angle) * 2.4f),
                     Alpha = 0.9f,
-                    AlphaDecay = 0.01f,
-                    Width = 14f + (float)(this.rng.NextDouble() * 10f),
-                    Height = 3f + (float)(this.rng.NextDouble() * 1.5f),
+                    AlphaDecay = 0.018f,
+                    Width = 7f + (float)(this.rng.NextDouble() * 5f),
+                    Height = 1.5f + (float)(this.rng.NextDouble() * 0.75f),
                     Rotation = angle,
                     RotationSpeed = 0f,
                     Color = palette[this.rng.Next(palette.Length)]

@@ -31,9 +31,11 @@ namespace FishSlapper
             var harmony = new Harmony(this.ModManifest.UniqueID);
             BobberBarPatch.Initialize(this.Controller);
             FarmerDrawPatch.Initialize(this.Controller);
+            FishingRodDrawPatch.Initialize(this.Controller);
             Game1DrawToolPatch.Initialize(this.Controller);
             BobberBarPatch.Apply(harmony);
             FarmerDrawPatch.Apply(harmony);
+            FishingRodDrawPatch.Apply(harmony);
             Game1DrawToolPatch.Apply(harmony);
 
             helper.Events.Input.ButtonPressed += this.OnButtonPressed;

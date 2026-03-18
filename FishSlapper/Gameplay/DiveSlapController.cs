@@ -4,6 +4,7 @@ using StardewModdingAPI;
 using StardewModdingAPI.Events;
 using StardewValley;
 using StardewValley.Menus;
+using StardewValley.Tools;
 using FishSlapper.Rendering;
 using FishSlapper.Vanilla;
 
@@ -45,6 +46,11 @@ namespace FishSlapper.Gameplay
         public void UpdateConfig(ModConfig config)
         {
             this.config = config;
+        }
+
+        public bool TryDrawCaughtFishPreview(FishingRod rod, SpriteBatch spriteBatch, Farmer farmer)
+        {
+            return this.renderer.TryDrawCaughtFishPreview(spriteBatch, farmer, rod);
         }
 
         public void OnButtonPressed(ButtonPressedEventArgs e)
