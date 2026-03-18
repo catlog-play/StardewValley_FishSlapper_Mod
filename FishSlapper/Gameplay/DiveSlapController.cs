@@ -17,9 +17,11 @@ namespace FishSlapper.Gameplay
         private const int WindupTicks = 8;
         private const int DivingTicks = 36;
         private const int ResolveTicks = 8;
+        private const int FailRetaliationTicks = 56;
         private const int ReturningTicks = 36;
         private const float DiveArcHeight = 72f;
         private const float ReturnArcHeight = 56f;
+        private const float FailRetaliationImpactProgress = 0.52f;
 
         private readonly IModHelper helper;
         private readonly IMonitor monitor;
@@ -165,8 +167,21 @@ namespace FishSlapper.Gameplay
                     break;
 
                 case DiveSlapState.ResolveFail:
-                    if (this.AdvancePhase(this.activeSession))
+                    bool failPhaseFinished = this.AdvancePhase(this.activeSession);
+                    if (!this.activeSession.FailRetaliationImpactTriggered
+                        && (this.GetPhaseProgress(this.activeSession) >= FailRetaliationImpactProgress || failPhaseFinished))
                     {
+                        this.TriggerFailRetaliationImpact(this.activeSession);
+                    }
+
+                    if (failPhaseFinished)
+                    {
+                        if (!this.activeSession.OutcomeApplied)
+                        {
+                            this.vanillaBridge.ApplyFailure(this.activeSession);
+                            this.activeSession.OutcomeApplied = true;
+                        }
+
                         this.BeginPhase(
                             this.activeSession,
                             DiveSlapState.Returning,
@@ -256,13 +271,9 @@ namespace FishSlapper.Gameplay
 
         private void BeginResolveFail(DiveSlapSession session)
         {
-            this.BeginPhase(session, DiveSlapState.ResolveFail, ResolveTicks, session.RenderPosition, session.RenderPosition);
-
-            if (!session.OutcomeApplied)
-            {
-                this.vanillaBridge.ApplyFailure(session);
-                session.OutcomeApplied = true;
-            }
+            session.FailRetaliationImpactTriggered = false;
+            this.BeginPhase(session, DiveSlapState.ResolveFail, FailRetaliationTicks, session.RenderPosition, session.RenderPosition);
+            this.renderer.PlayDiveRetaliationLaunch(session.FailRetaliationStartPosition);
         }
 
         private void BeginPhase(DiveSlapSession session, DiveSlapState state, int duration, Vector2 startPosition, Vector2 targetPosition)
@@ -278,11 +289,7 @@ namespace FishSlapper.Gameplay
         private bool AdvancePhase(DiveSlapSession session)
         {
             session.PhaseTicksRemaining = Math.Max(0, session.PhaseTicksRemaining - 1);
-            float progress = session.PhaseDurationTicks <= 0
-                ? 1f
-                : 1f - (float)session.PhaseTicksRemaining / session.PhaseDurationTicks;
-
-            progress = MathHelper.Clamp(progress, 0f, 1f);
+            float progress = this.GetPhaseProgress(session);
             Vector2 renderPosition = Vector2.Lerp(session.PhaseStartPosition, session.PhaseTargetPosition, progress);
             float arcHeight = session.State switch
             {
@@ -296,6 +303,24 @@ namespace FishSlapper.Gameplay
 
             session.RenderPosition = renderPosition;
             return session.PhaseTicksRemaining <= 0;
+        }
+
+        private float GetPhaseProgress(DiveSlapSession session)
+        {
+            float progress = session.PhaseDurationTicks <= 0
+                ? 1f
+                : 1f - (float)session.PhaseTicksRemaining / session.PhaseDurationTicks;
+            return MathHelper.Clamp(progress, 0f, 1f);
+        }
+
+        private void TriggerFailRetaliationImpact(DiveSlapSession session)
+        {
+            session.FailRetaliationImpactTriggered = true;
+            string retaliationText = this.helper.Translation
+                .Get("hud.dive-slap-retaliation", new { fish = session.TargetFishDisplayName })
+                .ToString();
+            this.renderer.PlayDiveRetaliationImpact(session.FailRetaliationImpactPosition);
+            Game1.addHUDMessage(HUDMessage.ForCornerTextbox(retaliationText));
         }
 
         private void LockPlayerForDive(DiveSlapSession session)

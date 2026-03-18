@@ -33,6 +33,12 @@ namespace FishSlapper.Vanilla
             Vector2 originalPlayerPosition = Game1.player.Position;
             int castFacingDirection = ResolveDiveCastFacingDirection(rod, originalPlayerPosition, bobberPosition);
             DiveDifficultyProfile difficultyProfile = ResolveDiveDifficultyProfile(bobberBar);
+            string qualifiedFishId = bobberBar.whichFish;
+            var fishMetadata = ItemRegistry.GetMetadata(qualifiedFishId);
+            var fishData = fishMetadata.GetParsedOrErrorData();
+            Vector2 retaliationImpactPosition = GetFailRetaliationImpactPosition(bobberPosition, castFacingDirection);
+            Vector2 retaliationStartPosition = retaliationImpactPosition + new Vector2(124f, 52f);
+            Vector2 retaliationExitPosition = retaliationImpactPosition + new Vector2(-148f, 58f);
 
             session = new DiveSlapSession
             {
@@ -48,6 +54,12 @@ namespace FishSlapper.Vanilla
                 RequiredHits = difficultyProfile.RequiredHits,
                 TotalSlapTicks = difficultyProfile.DurationTicks,
                 RemainingSlapTicks = difficultyProfile.DurationTicks,
+                TargetFishQualifiedItemId = qualifiedFishId,
+                TargetFishDisplayName = fishData.DisplayName ?? qualifiedFishId,
+                FailRetaliationStartPosition = retaliationStartPosition,
+                FailRetaliationImpactPosition = retaliationImpactPosition,
+                FailRetaliationExitPosition = retaliationExitPosition,
+                FailRetaliationArcHeight = 92f,
                 RenderPosition = originalPlayerPosition,
                 PhaseStartPosition = originalPlayerPosition,
                 PhaseTargetPosition = originalPlayerPosition
@@ -262,6 +274,17 @@ namespace FishSlapper.Vanilla
                 "floater" => DiveFishBehavior.Floater,
                 _ => DiveFishBehavior.Unknown
             };
+        }
+
+        private static Vector2 GetFailRetaliationImpactPosition(Vector2 bobberPosition, int castFacingDirection)
+        {
+            Vector2 renderOffset = castFacingDirection == 0
+                ? DiveStrikeToFarmerOffsetUp
+                : castFacingDirection == 3
+                    ? DiveStrikeToFarmerOffsetLeft
+                    : DiveStrikeToFarmerOffsetRight;
+            Vector2 diveRenderPosition = bobberPosition + renderOffset;
+            return diveRenderPosition + new Vector2(34f, -88f);
         }
 
         private static int ResolveDiveCastFacingDirection(FishingRod rod, Vector2 originalPlayerPosition, Vector2 bobberPosition)

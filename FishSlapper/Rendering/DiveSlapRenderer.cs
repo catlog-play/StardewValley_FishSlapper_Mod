@@ -19,11 +19,17 @@ namespace FishSlapper.Rendering
         // 3. 水中待机或强制复位时的四向站立帧
         private const int DiveSlapPunchRightFrame = 274;
         private const int DiveSlapPunchLeftFrame = 278;
-        // 跳水位移阶段，当前改用 docs 里的 carryRun 组。
+        // 准备阶段单独用 walk 组；真正的入水/出水位移继续用 carryRun 组。
+        private const int DiveSlapWindupDownFrame = 0;
+        private const int DiveSlapWindupRightFrame = 8;
+        private const int DiveSlapWindupUpFrame = 16;
+        private const int DiveSlapWindupLeftFrame = 24;
         private const int DiveSlapMoveDownFrame = 128;
         private const int DiveSlapMoveRightFrame = 136;
         private const int DiveSlapMoveUpFrame = 144;
         private const int DiveSlapMoveLeftFrame = 152;
+        // 原版 FarmerSprite 没有独立的 standDown 常量，静止朝下就是 frame 0。
+        private const int FarmerIdleDownFrame = 0;
         private const int FarmerStandDownFrame = 0;
         private const int FarmerStandRightFrame = 8;
         private const int FarmerStandUpFrame = 16;
@@ -36,6 +42,8 @@ namespace FishSlapper.Rendering
 
         private const int CaughtFishSlapDurationTicks = 30;
         private const int DiveHitAnimationDurationTicks = 10;
+        private const float FailRetaliationImpactProgress = 0.52f;
+        private const float FailRetaliationFishScale = 4f;
 
         private const float HudBarWidth = 120f;
         private const float HudHitBarHeight = 11f;
@@ -94,7 +102,7 @@ namespace FishSlapper.Rendering
         public bool ShouldSuppressToolDraw(Farmer farmer)
         {
             return ReferenceEquals(farmer, this.toolSuppressedFarmer)
-                || (ReferenceEquals(farmer, Game1.player) && this.localPoseResetTicks > 0 && this.caughtFishSlapTick < 0);
+                || (ReferenceEquals(farmer, Game1.player) && this.localPoseResetTicks > 0 && this.caughtFishSlapTick < 0 && !Game1.player.UsingTool);
         }
 
         public void ResetLocalPlayerPose(int facingDirection)
@@ -142,6 +150,18 @@ namespace FishSlapper.Rendering
         public void PlayDiveJump()
         {
             Game1.playSound(ModConstants.DiveJumpSoundId);
+        }
+
+        public void PlayDiveRetaliationLaunch(Vector2 launchWorldPos)
+        {
+            Game1.playSound(ModConstants.DiveWaterEntrySoundId);
+            this.SpawnSplashParticles(launchWorldPos);
+        }
+
+        public void PlayDiveRetaliationImpact(Vector2 impactWorldPos)
+        {
+            Game1.playSound(ModConstants.SlapSoundId);
+            this.SpawnRetaliationImpactParticles(impactWorldPos);
         }
 
         public void OnUpdateTicked(DiveSlapSession? session)
@@ -197,7 +217,12 @@ namespace FishSlapper.Rendering
             }
 
             if (this.localPoseResetTicks > 0)
-                this.localPoseResetTicks--;
+            {
+                if (Game1.player.UsingTool)
+                    this.localPoseResetTicks = 0;
+                else
+                    this.localPoseResetTicks--;
+            }
 
             if (session is not null && session.SlapAnimationTicksRemaining > 0)
                 session.SlapAnimationTicksRemaining--;
@@ -234,7 +259,12 @@ namespace FishSlapper.Rendering
             this.hideCaughtFishPreview = false;
 
             if (this.localPoseResetTicks > 0)
-                this.ApplyPose(Game1.player, GetStandingFrame(this.localPoseResetFacingDirection));
+            {
+                if (Game1.player.UsingTool)
+                    this.localPoseResetTicks = 0;
+                else
+                    this.ApplyPose(Game1.player, GetStandingFrame(this.localPoseResetFacingDirection));
+            }
         }
 
         public bool TryDrawDiveSession(SpriteBatch spriteBatch, DiveSlapSession? session)
@@ -263,6 +293,9 @@ namespace FishSlapper.Rendering
         {
             if (session is null)
                 this.diveRenderFarmer = null;
+
+            if (session is not null && session.State == DiveSlapState.ResolveFail)
+                this.DrawFailRetaliationFish(e.SpriteBatch, session);
 
             if (this.pixelTexture is not null)
             {
@@ -500,11 +533,24 @@ namespace FishSlapper.Rendering
             int facingDirection = GetDiveFacingDirection(session);
             return session.State switch
             {
-                DiveSlapState.Windup => GetDiveMoveFrame(facingDirection),
+                DiveSlapState.Windup => GetDiveWindupFrame(facingDirection),
                 DiveSlapState.Diving => GetDiveMoveFrame(facingDirection),
                 DiveSlapState.Returning => GetDiveMoveFrame(facingDirection),
                 DiveSlapState.Slapping when session.SlapAnimationTicksRemaining > 0 => session.FacingRight ? DiveSlapPunchRightFrame : DiveSlapPunchLeftFrame,
+                DiveSlapState.Slapping => FarmerIdleDownFrame,
+                DiveSlapState.ResolveFail => FarmerIdleDownFrame,
                 _ => GetDiveIdleFrame(facingDirection)
+            };
+        }
+
+        private static int GetDiveWindupFrame(int facingDirection)
+        {
+            return facingDirection switch
+            {
+                0 => DiveSlapWindupUpFrame,
+                1 => DiveSlapWindupRightFrame,
+                2 => DiveSlapWindupDownFrame,
+                _ => DiveSlapWindupLeftFrame
             };
         }
 
@@ -628,6 +674,31 @@ namespace FishSlapper.Rendering
             }
         }
 
+        private void DrawFailRetaliationFish(SpriteBatch spriteBatch, DiveSlapSession session)
+        {
+            if (string.IsNullOrWhiteSpace(session.TargetFishQualifiedItemId))
+                return;
+
+            var fishData = ItemRegistry.GetMetadata(session.TargetFishQualifiedItemId).GetParsedOrErrorData();
+            Texture2D fishTexture = fishData.GetTexture();
+            Rectangle fishSourceRect = fishData.GetSourceRect(0, null);
+            Vector2 worldPos = GetFailRetaliationFishWorldPosition(session, this.GetPhaseProgress(session));
+            Vector2 screenPos = Game1.GlobalToLocal(Game1.viewport, worldPos);
+            Vector2 origin = new(fishSourceRect.Width / 2f, fishSourceRect.Height / 2f);
+
+            spriteBatch.Draw(
+                fishTexture,
+                screenPos,
+                fishSourceRect,
+                Color.White,
+                this.GetFailRetaliationFishRotation(session),
+                origin,
+                FailRetaliationFishScale,
+                SpriteEffects.FlipHorizontally,
+                1f
+            );
+        }
+
         private void DrawDiveSlapPrompt(SpriteBatch spriteBatch, string promptText)
         {
             this.EnsurePixelTexture();
@@ -664,6 +735,59 @@ namespace FishSlapper.Rendering
                 0f, Vector2.Zero, 1f, SpriteEffects.None, 1f);
         }
 
+        private float GetPhaseProgress(DiveSlapSession session)
+        {
+            float progress = session.PhaseDurationTicks <= 0
+                ? 1f
+                : 1f - (float)session.PhaseTicksRemaining / session.PhaseDurationTicks;
+            return MathHelper.Clamp(progress, 0f, 1f);
+        }
+
+        private static Vector2 GetFailRetaliationFishWorldPosition(DiveSlapSession session, float progress)
+        {
+            progress = MathHelper.Clamp(progress, 0f, 1f);
+            if (progress <= FailRetaliationImpactProgress)
+            {
+                float arcProgress = progress / FailRetaliationImpactProgress;
+                return GetArcPosition(
+                    session.FailRetaliationStartPosition,
+                    session.FailRetaliationImpactPosition,
+                    session.FailRetaliationArcHeight,
+                    arcProgress
+                );
+            }
+
+            float postImpactProgress = (progress - FailRetaliationImpactProgress) / (1f - FailRetaliationImpactProgress);
+            return GetArcPosition(
+                session.FailRetaliationImpactPosition,
+                session.FailRetaliationExitPosition,
+                -28f,
+                postImpactProgress
+            );
+        }
+
+        private float GetFailRetaliationFishRotation(DiveSlapSession session)
+        {
+            float progress = this.GetPhaseProgress(session);
+            float previousProgress = Math.Max(0f, progress - 0.015f);
+            float nextProgress = Math.Min(1f, progress + 0.015f);
+            Vector2 tangent = GetFailRetaliationFishWorldPosition(session, nextProgress)
+                - GetFailRetaliationFishWorldPosition(session, previousProgress);
+            if (tangent.LengthSquared() <= 0.0001f)
+                return 0f;
+
+            // 当前鱼物品贴图在水平翻转后，视觉朝向更接近“头朝上”，
+            // 所以这里用切线角再补一个 90 度偏移，让鱼头真正沿轨迹前进。
+            return MathF.Atan2(tangent.Y, tangent.X) + MathF.PI / 2f;
+        }
+
+        private static Vector2 GetArcPosition(Vector2 start, Vector2 end, float arcHeight, float progress)
+        {
+            Vector2 worldPos = Vector2.Lerp(start, end, MathHelper.Clamp(progress, 0f, 1f));
+            worldPos.Y -= MathF.Sin(progress * MathF.PI) * arcHeight;
+            return worldPos;
+        }
+
         private void DrawHudRect(SpriteBatch spriteBatch, float x, float y, float width, float height, Color color)
         {
             spriteBatch.Draw(
@@ -685,6 +809,58 @@ namespace FishSlapper.Rendering
             if (fraction > 0.2f)
                 return Color.Lerp(HudTimeRedColor, HudTimeYellowColor, (fraction - 0.2f) / 0.3f);
             return HudTimeRedColor;
+        }
+
+        private void SpawnSplashParticles(Vector2 splashWorldPos)
+        {
+            this.EnsurePixelTexture();
+
+            Color[] palette = { new Color(170, 220, 255), new Color(120, 190, 255), Color.White };
+            int dropletCount = this.rng.Next(10, 15);
+            for (int i = 0; i < dropletCount; i++)
+            {
+                float angle = MathHelper.Pi + (float)(this.rng.NextDouble() * MathHelper.Pi);
+                float speed = 1.8f + (float)(this.rng.NextDouble() * 3.8f);
+                float width = 2f + (float)(this.rng.NextDouble() * 2f);
+                this.burstParticles.Add(new BurstParticle
+                {
+                    WorldPos = splashWorldPos + new Vector2((float)(this.rng.NextDouble() * 16f - 8f), (float)(this.rng.NextDouble() * 6f - 3f)),
+                    Velocity = new Vector2(MathF.Cos(angle) * speed, MathF.Sin(angle) * speed - 1.8f),
+                    Alpha = 0.95f,
+                    AlphaDecay = 0.035f + (float)(this.rng.NextDouble() * 0.01f),
+                    Width = width,
+                    Height = width * 1.3f,
+                    Rotation = angle,
+                    RotationSpeed = (float)(this.rng.NextDouble() * 0.2f - 0.1f),
+                    Color = palette[this.rng.Next(palette.Length)]
+                });
+            }
+        }
+
+        private void SpawnRetaliationImpactParticles(Vector2 impactWorldPos)
+        {
+            this.SpawnBurstParticles(impactWorldPos);
+
+            Color[] palette = { Color.White, new Color(255, 245, 160), new Color(255, 165, 80) };
+            int shockCount = this.rng.Next(18, 24);
+            for (int i = 0; i < shockCount; i++)
+            {
+                float angle = (float)(this.rng.NextDouble() * MathHelper.TwoPi);
+                float speed = 4.5f + (float)(this.rng.NextDouble() * 8f);
+                float width = 6f + (float)(this.rng.NextDouble() * 5f);
+                this.burstParticles.Add(new BurstParticle
+                {
+                    WorldPos = impactWorldPos + new Vector2((float)(this.rng.NextDouble() * 8f - 4f), (float)(this.rng.NextDouble() * 8f - 4f)),
+                    Velocity = new Vector2(MathF.Cos(angle) * speed, MathF.Sin(angle) * speed),
+                    Alpha = 1f,
+                    AlphaDecay = 0.028f + (float)(this.rng.NextDouble() * 0.01f),
+                    Width = width,
+                    Height = 2f + (float)(this.rng.NextDouble() * 1.2f),
+                    Rotation = angle,
+                    RotationSpeed = 0f,
+                    Color = palette[this.rng.Next(palette.Length)]
+                });
+            }
         }
 
         private void SpawnBurstParticles(Vector2 impactWorldPos)

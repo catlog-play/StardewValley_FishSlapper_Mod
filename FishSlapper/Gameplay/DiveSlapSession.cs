@@ -18,6 +18,13 @@ namespace FishSlapper.Gameplay
         public int RequiredHits { get; set; }
         public int TotalSlapTicks { get; set; }
         public int RemainingSlapTicks { get; set; }
+        public string TargetFishQualifiedItemId { get; set; } = string.Empty;
+        public string TargetFishDisplayName { get; set; } = "???";
+        public Vector2 FailRetaliationStartPosition { get; set; }
+        public Vector2 FailRetaliationImpactPosition { get; set; }
+        public Vector2 FailRetaliationExitPosition { get; set; }
+        public float FailRetaliationArcHeight { get; set; }
+        public bool FailRetaliationImpactTriggered { get; set; }
 
         public DiveSlapState State { get; set; } = DiveSlapState.None;
         public Vector2 RenderPosition { get; set; }
