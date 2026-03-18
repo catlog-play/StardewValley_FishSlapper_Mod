@@ -12,6 +12,8 @@ namespace FishSlapper.Gameplay
 {
     internal sealed class DiveSlapController
     {
+        private const int DiveSlapHealthCost = 20;
+        private const float DiveSlapStaminaCost = 50f;
         private const int WindupTicks = 8;
         private const int DivingTicks = 36;
         private const int ResolveTicks = 8;
@@ -71,10 +73,10 @@ namespace FishSlapper.Gameplay
                 return;
             }
 
-            if (!this.config.EnableDiveSlap || !this.config.DiveSlapKey.JustPressed())
+            if (!this.config.DiveSlapKey.JustPressed())
                 return;
 
-            if (!this.vanillaBridge.TryCreateDiveSession(this.config, out DiveSlapSession? session) || session is null)
+            if (!this.vanillaBridge.TryCreateDiveSession(out DiveSlapSession? session) || session is null)
                 return;
 
             this.activeSession = session;
@@ -226,7 +228,7 @@ namespace FishSlapper.Gameplay
 
             if (!session.OutcomeApplied)
             {
-                this.vanillaBridge.ApplySuccess(session, this.config);
+                this.vanillaBridge.ApplySuccess(session);
                 session.OutcomeApplied = true;
             }
         }
@@ -313,8 +315,10 @@ namespace FishSlapper.Gameplay
             if (this.activeSession is null)
                 return;
 
-            this.RestorePlayerFromDive(this.activeSession);
+            DiveSlapSession completedSession = this.activeSession;
+            this.RestorePlayerFromDive(completedSession);
             this.activeSession = null;
+            this.ApplyDiveCostOnReturn();
         }
 
         private void CancelSession()
@@ -324,6 +328,28 @@ namespace FishSlapper.Gameplay
 
             this.RestorePlayerFromDive(this.activeSession);
             this.activeSession = null;
+        }
+
+        private void ApplyDiveCostOnReturn()
+        {
+            Farmer player = Game1.player;
+            float oldStamina = player.Stamina;
+
+            if (player.health <= DiveSlapHealthCost)
+            {
+                player.takeDamage(player.health, true, null!);
+                return;
+            }
+
+            if (oldStamina <= DiveSlapStaminaCost)
+            {
+                player.Stamina = 0f;
+                player.checkForExhaustion(oldStamina);
+                return;
+            }
+
+            player.health -= DiveSlapHealthCost;
+            player.Stamina = oldStamina - DiveSlapStaminaCost;
         }
     }
 }

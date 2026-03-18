@@ -5,6 +5,7 @@ using StardewValley.Menus;
 using StardewValley.Tools;
 using FishSlapper.Gameplay;
 using System;
+using System.Collections.Generic;
 
 namespace FishSlapper.Vanilla
 {
@@ -21,7 +22,7 @@ namespace FishSlapper.Vanilla
             return rod is not null && rod.fishCaught;
         }
 
-        public bool TryCreateDiveSession(ModConfig config, out DiveSlapSession? session)
+        public bool TryCreateDiveSession(out DiveSlapSession? session)
         {
             session = null;
 
@@ -31,6 +32,7 @@ namespace FishSlapper.Vanilla
             Vector2 bobberPosition = rod.bobber.Get();
             Vector2 originalPlayerPosition = Game1.player.Position;
             int castFacingDirection = ResolveDiveCastFacingDirection(rod, originalPlayerPosition, bobberPosition);
+            DiveDifficultyProfile difficultyProfile = ResolveDiveDifficultyProfile(bobberBar);
 
             session = new DiveSlapSession
             {
@@ -43,8 +45,8 @@ namespace FishSlapper.Vanilla
                 PreviousFacingDirection = Game1.player.FacingDirection,
                 PreviousCanMove = Game1.player.canMove,
                 PreviousFreezePause = Game1.player.freezePause,
-                RequiredHits = Math.Max(1, config.DiveSlapRequiredHits),
-                RemainingSlapTicks = Math.Max(1, config.DiveSlapDurationTicks),
+                RequiredHits = difficultyProfile.RequiredHits,
+                RemainingSlapTicks = difficultyProfile.DurationTicks,
                 RenderPosition = originalPlayerPosition,
                 PhaseStartPosition = originalPlayerPosition,
                 PhaseTargetPosition = originalPlayerPosition
@@ -71,11 +73,12 @@ namespace FishSlapper.Vanilla
                 && session.State is DiveSlapState.Windup or DiveSlapState.Diving or DiveSlapState.Slapping or DiveSlapState.ResolveSuccess or DiveSlapState.ResolveFail;
         }
 
-        public void ApplySuccess(DiveSlapSession session, ModConfig config)
+        public void ApplySuccess(DiveSlapSession session)
         {
             BobberBar bobberBar = session.BobberBar;
             FishingRod rod = session.Rod;
-            bool wasPerfect = bobberBar.perfect && !config.CancelPerfectOnDiveSuccess;
+            // 跳水成功固定取消 perfect，不再提供配置开关。
+            bool wasPerfect = false;
             int resolvedFishQuality = ResolveFishQuality(bobberBar.fishQuality, wasPerfect);
 
             if (!bobberBar.fromFishPond && bobberBar.whichFish.StartsWith("(O)", StringComparison.Ordinal))
@@ -161,6 +164,105 @@ namespace FishSlapper.Vanilla
             Game1.player.gainExperience(Farmer.fishingSkill, experience);
         }
 
+        private static DiveDifficultyProfile ResolveDiveDifficultyProfile(BobberBar bobberBar)
+        {
+            int requiredHits;
+            float durationSeconds;
+
+            if (bobberBar.bossFish || bobberBar.difficulty >= 105f)
+            {
+                requiredHits = 9;
+                durationSeconds = 2f;
+            }
+            else if (bobberBar.difficulty < 40f)
+            {
+                requiredHits = 5;
+                durationSeconds = 3f;
+            }
+            else if (bobberBar.difficulty < 70f)
+            {
+                requiredHits = 6;
+                durationSeconds = 2.7f;
+            }
+            else if (bobberBar.difficulty < 90f)
+            {
+                requiredHits = 7;
+                durationSeconds = 2.5f;
+            }
+            else
+            {
+                requiredHits = 8;
+                durationSeconds = 2.2f;
+            }
+
+            if (TryGetFishBehavior(bobberBar.whichFish, out DiveFishBehavior behavior))
+            {
+                switch (behavior)
+                {
+                    case DiveFishBehavior.Mixed:
+                        requiredHits += 1;
+                        durationSeconds -= 0.2f;
+                        break;
+
+                    case DiveFishBehavior.Sinker:
+                        requiredHits += 1;
+                        break;
+
+                    case DiveFishBehavior.Dart:
+                        requiredHits += 1;
+                        durationSeconds -= 0.2f;
+                        break;
+                }
+            }
+
+            int durationTicks = (int)MathF.Round(durationSeconds * 60f, MidpointRounding.AwayFromZero);
+            return new DiveDifficultyProfile(
+                Math.Max(1, requiredHits),
+                Math.Max(1, durationTicks)
+            );
+        }
+
+        private static bool TryGetFishBehavior(string qualifiedFishId, out DiveFishBehavior behavior)
+        {
+            behavior = DiveFishBehavior.Unknown;
+
+            string itemId = ExtractFishItemId(qualifiedFishId);
+            if (string.IsNullOrWhiteSpace(itemId))
+                return false;
+
+            Dictionary<string, string> fishData = Game1.content.Load<Dictionary<string, string>>("Data\\Fish");
+            if (!fishData.TryGetValue(itemId, out string? rawData) || string.IsNullOrWhiteSpace(rawData))
+                return false;
+
+            string[] fields = rawData.Split('/');
+            if (fields.Length < 3)
+                return false;
+
+            behavior = ParseFishBehavior(fields[2]);
+            return behavior != DiveFishBehavior.Unknown;
+        }
+
+        private static string ExtractFishItemId(string qualifiedFishId)
+        {
+            const string objectPrefix = "(O)";
+            return qualifiedFishId.StartsWith(objectPrefix, StringComparison.Ordinal)
+                ? qualifiedFishId[objectPrefix.Length..]
+                : qualifiedFishId;
+        }
+
+        private static DiveFishBehavior ParseFishBehavior(string rawBehavior)
+        {
+            return rawBehavior.Trim().ToLowerInvariant() switch
+            {
+                "mixed" => DiveFishBehavior.Mixed,
+                "sinker" => DiveFishBehavior.Sinker,
+                "dart" => DiveFishBehavior.Dart,
+                "smooth" => DiveFishBehavior.Smooth,
+                "floater" => DiveFishBehavior.Floater,
+                _ => DiveFishBehavior.Unknown
+            };
+        }
+
         private static int ResolveDiveCastFacingDirection(FishingRod rod, Vector2 originalPlayerPosition, Vector2 bobberPosition)
         {
             // 优先使用 FishingRod 自己记录的抛竿方向。
@@ -203,5 +305,17 @@ namespace FishSlapper.Vanilla
 
             return deltaX >= 0f;
         }
+
+        private enum DiveFishBehavior
+        {
+            Unknown,
+            Smooth,
+            Mixed,
+            Dart,
+            Floater,
+            Sinker
+        }
+
+        private readonly record struct DiveDifficultyProfile(int RequiredHits, int DurationTicks);
     }
 }
