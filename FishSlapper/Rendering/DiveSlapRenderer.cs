@@ -36,6 +36,25 @@ namespace FishSlapper.Rendering
 
         private const int CaughtFishSlapDurationTicks = 30;
         private const int DiveHitAnimationDurationTicks = 10;
+
+        private const float HudBarWidth = 120f;
+        private const float HudHitBarHeight = 11f;
+        private const float HudTimeBarHeight = 8f;
+        private const float HudBarGap = 3f;
+        private const float HudBorderSize = 2f;
+        private const float HudAboveFeetOffset = 160f;
+        private const float HudSegmentGap = 2f;
+        private const float HudTextScale = 1.1f;
+
+        private static readonly Color HudBorderColor = new(40, 30, 20, 230);
+        private static readonly Color HudHitFilledColor = new(255, 200, 50);
+        private static readonly Color HudHitEmptyColor = new(60, 50, 40, 130);
+        private static readonly Color HudTimeBarBgColor = new(30, 25, 20, 150);
+        private static readonly Color HudTimeGreenColor = new(80, 220, 80);
+        private static readonly Color HudTimeYellowColor = new(240, 220, 50);
+        private static readonly Color HudTimeRedColor = new(230, 60, 50);
+        private static readonly Color HudTextShadowColor = new(20, 15, 10, 180);
+
         private readonly List<BurstParticle> burstParticles = new();
         private readonly Random rng = new();
         private Texture2D? pixelTexture;
@@ -261,29 +280,14 @@ namespace FishSlapper.Rendering
                 }
             }
 
+            if (session is not null && session.State == DiveSlapState.Slapping)
+                this.DrawSlapProgressHud(e.SpriteBatch, session);
+
             this.hideCaughtFishPreview = false;
         }
 
         public void OnRenderedActiveMenu(RenderedActiveMenuEventArgs e, DiveSlapSession? session)
         {
-            if (session is null)
-                return;
-
-            string title = $"Dive slap {session.CurrentHits}/{session.RequiredHits}";
-            string detail = session.State switch
-            {
-                DiveSlapState.Windup => "Jumping...",
-                DiveSlapState.Diving => "Diving...",
-                DiveSlapState.Slapping => $"Time {session.RemainingSlapTicks / 60f:0.0}s",
-                DiveSlapState.ResolveSuccess => "Caught!",
-                DiveSlapState.ResolveFail => "Escaped!",
-                DiveSlapState.Returning => "Returning...",
-                _ => string.Empty
-            };
-
-            Utility.drawTextWithShadow(e.SpriteBatch, title, Game1.dialogueFont, new Vector2(64f, 64f), Game1.textColor);
-            if (detail.Length > 0)
-                Utility.drawTextWithShadow(e.SpriteBatch, detail, Game1.smallFont, new Vector2(64f, 108f), Game1.textColor);
         }
 
         private void DrawDiveSession(SpriteBatch spriteBatch, DiveSlapSession session)
@@ -553,6 +557,79 @@ namespace FishSlapper.Rendering
                 SpriteEffects.None,
                 layerDepth
             );
+        }
+
+        private void DrawSlapProgressHud(SpriteBatch spriteBatch, DiveSlapSession session)
+        {
+            this.EnsurePixelTexture();
+            if (this.pixelTexture is null || session.RequiredHits <= 0)
+                return;
+
+            Vector2 screenPos = Game1.GlobalToLocal(Game1.viewport, session.RenderPosition);
+            float centerX = screenPos.X + 32f;
+            float barLeft = centerX - HudBarWidth / 2f;
+            float hitBarTop = screenPos.Y - HudAboveFeetOffset;
+            float timeBarTop = hitBarTop + HudHitBarHeight + HudBarGap;
+
+            string hitsText = $"{session.CurrentHits}/{session.RequiredHits}";
+            Vector2 textSize = Game1.smallFont.MeasureString(hitsText) * HudTextScale;
+            Vector2 textPos = new(centerX - textSize.X / 2f, hitBarTop - textSize.Y - 2f);
+
+            spriteBatch.DrawString(Game1.smallFont, hitsText,
+                textPos + new Vector2(1f, 1f), HudTextShadowColor,
+                0f, Vector2.Zero, HudTextScale, SpriteEffects.None, 1f);
+            spriteBatch.DrawString(Game1.smallFont, hitsText,
+                textPos, Color.White,
+                0f, Vector2.Zero, HudTextScale, SpriteEffects.None, 1f);
+
+            this.DrawHudRect(spriteBatch, barLeft - HudBorderSize, hitBarTop - HudBorderSize,
+                HudBarWidth + HudBorderSize * 2f, HudHitBarHeight + HudBorderSize * 2f, HudBorderColor);
+
+            float totalGaps = (session.RequiredHits - 1) * HudSegmentGap;
+            float segWidth = (HudBarWidth - totalGaps) / session.RequiredHits;
+            for (int i = 0; i < session.RequiredHits; i++)
+            {
+                float segX = barLeft + i * (segWidth + HudSegmentGap);
+                Color segColor = i < session.CurrentHits ? HudHitFilledColor : HudHitEmptyColor;
+                this.DrawHudRect(spriteBatch, segX, hitBarTop, segWidth, HudHitBarHeight, segColor);
+            }
+
+            this.DrawHudRect(spriteBatch, barLeft - HudBorderSize, timeBarTop - HudBorderSize,
+                HudBarWidth + HudBorderSize * 2f, HudTimeBarHeight + HudBorderSize * 2f, HudBorderColor);
+            this.DrawHudRect(spriteBatch, barLeft, timeBarTop, HudBarWidth, HudTimeBarHeight, HudTimeBarBgColor);
+
+            float timeFraction = session.TotalSlapTicks > 0
+                ? MathHelper.Clamp((float)session.RemainingSlapTicks / session.TotalSlapTicks, 0f, 1f)
+                : 0f;
+            if (timeFraction > 0f)
+            {
+                float fillWidth = HudBarWidth * timeFraction;
+                Color timeColor = GetTimeBarColor(timeFraction);
+                this.DrawHudRect(spriteBatch, barLeft, timeBarTop, fillWidth, HudTimeBarHeight, timeColor);
+            }
+        }
+
+        private void DrawHudRect(SpriteBatch spriteBatch, float x, float y, float width, float height, Color color)
+        {
+            spriteBatch.Draw(
+                this.pixelTexture!,
+                new Vector2(x, y),
+                sourceRectangle: null,
+                color: color,
+                rotation: 0f,
+                origin: Vector2.Zero,
+                scale: new Vector2(width, height),
+                effects: SpriteEffects.None,
+                layerDepth: 1f);
+        }
+
+        private static Color GetTimeBarColor(float fraction)
+        {
+            if (fraction > 0.5f)
+                return Color.Lerp(HudTimeYellowColor, HudTimeGreenColor, (fraction - 0.5f) * 2f);
+            if (fraction > 0.2f)
+                return Color.Lerp(HudTimeRedColor, HudTimeYellowColor, (fraction - 0.2f) / 0.3f);
+            return HudTimeRedColor;
         }
 
         private void SpawnBurstParticles(Vector2 impactWorldPos)

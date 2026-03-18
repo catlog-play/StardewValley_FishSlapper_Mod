@@ -16,6 +16,7 @@ namespace FishSlapper.Gameplay
         public bool PreviousCanMove { get; set; }
         public int PreviousFreezePause { get; set; }
         public int RequiredHits { get; set; }
+        public int TotalSlapTicks { get; set; }
         public int RemainingSlapTicks { get; set; }
 
         public DiveSlapState State { get; set; } = DiveSlapState.None;

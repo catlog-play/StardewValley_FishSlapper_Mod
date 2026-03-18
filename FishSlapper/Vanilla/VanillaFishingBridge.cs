@@ -46,6 +46,7 @@ namespace FishSlapper.Vanilla
                 PreviousCanMove = Game1.player.canMove,
                 PreviousFreezePause = Game1.player.freezePause,
                 RequiredHits = difficultyProfile.RequiredHits,
+                TotalSlapTicks = difficultyProfile.DurationTicks,
                 RemainingSlapTicks = difficultyProfile.DurationTicks,
                 RenderPosition = originalPlayerPosition,
                 PhaseStartPosition = originalPlayerPosition,
