@@ -20,6 +20,14 @@ namespace FishSlapper.Gameplay
         public int RemainingSlapTicks { get; set; }
         public string TargetFishQualifiedItemId { get; set; } = string.Empty;
         public string TargetFishDisplayName { get; set; } = "???";
+        public Vector2 SlapFishSurfacePosition { get; set; }
+        public float SlapFishOffsetX { get; set; }
+        public float SlapFishOffsetY { get; set; }
+        public float SlapFishRotation { get; set; }
+        public float SlapFishVelocityX { get; set; }
+        public float SlapFishVelocityY { get; set; }
+        public float SlapFishRotationVelocity { get; set; }
+        public int SlapFishBouncesRemaining { get; set; }
         public Vector2 FailRetaliationStartPosition { get; set; }
         public Vector2 FailRetaliationImpactPosition { get; set; }
         public Vector2 FailRetaliationExitPosition { get; set; }

@@ -252,7 +252,7 @@ namespace FishSlapper.Gameplay
             // 入水后只认扇鱼键；累计次数达到阈值后立刻走成功结算。
             this.activeSession.CurrentHits++;
             this.activeSession.SlapAnimationTicksRemaining = this.renderer.DiveHitTickDuration;
-            this.renderer.PlayDiveSlap(this.activeSession.TargetBobberPosition + new Vector2(0f, -8f));
+            this.renderer.PlayDiveSlap(this.activeSession, this.activeSession.TargetBobberPosition + new Vector2(0f, -8f));
 
             if (this.activeSession.CurrentHits >= this.activeSession.RequiredHits)
                 this.BeginResolveSuccess(this.activeSession);

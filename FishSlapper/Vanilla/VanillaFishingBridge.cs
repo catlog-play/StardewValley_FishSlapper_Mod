@@ -36,6 +36,7 @@ namespace FishSlapper.Vanilla
             string qualifiedFishId = bobberBar.whichFish;
             var fishMetadata = ItemRegistry.GetMetadata(qualifiedFishId);
             var fishData = fishMetadata.GetParsedOrErrorData();
+            Vector2 slapFishSurfacePosition = bobberPosition + new Vector2(0f, 6f);
             Vector2 retaliationImpactPosition = GetFailRetaliationImpactPosition(bobberPosition, castFacingDirection);
             Vector2 retaliationStartPosition = retaliationImpactPosition + new Vector2(124f, 52f);
             Vector2 retaliationExitPosition = retaliationImpactPosition + new Vector2(-148f, 58f);
@@ -56,6 +57,7 @@ namespace FishSlapper.Vanilla
                 RemainingSlapTicks = difficultyProfile.DurationTicks,
                 TargetFishQualifiedItemId = qualifiedFishId,
                 TargetFishDisplayName = fishData.DisplayName ?? qualifiedFishId,
+                SlapFishSurfacePosition = slapFishSurfacePosition,
                 FailRetaliationStartPosition = retaliationStartPosition,
                 FailRetaliationImpactPosition = retaliationImpactPosition,
                 FailRetaliationExitPosition = retaliationExitPosition,

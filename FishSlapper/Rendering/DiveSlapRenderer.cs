@@ -43,6 +43,8 @@ namespace FishSlapper.Rendering
         private const int CaughtFishSlapDurationTicks = 30;
         private const int DiveHitAnimationDurationTicks = 10;
         private const float FailRetaliationImpactProgress = 0.52f;
+        private const float SlapFishScale = 4f;
+        private const float SlapFishIdleBobAmplitude = 2.5f;
         private const float FailRetaliationFishScale = 4f;
 
         private const float HudBarWidth = 120f;
@@ -131,9 +133,10 @@ namespace FishSlapper.Rendering
             this.SpawnBurstParticles(Game1.player.Position + new Vector2(-16f, -64f));
         }
 
-        public void PlayDiveSlap(Vector2 impactWorldPos)
+        public void PlayDiveSlap(DiveSlapSession session, Vector2 impactWorldPos)
         {
             Game1.playSound(ModConstants.SlapSoundId);
+            this.StartDiveSlapFishJump(session);
             this.SpawnBurstParticles(impactWorldPos);
         }
 
@@ -227,6 +230,9 @@ namespace FishSlapper.Rendering
             if (session is not null && session.SlapAnimationTicksRemaining > 0)
                 session.SlapAnimationTicksRemaining--;
 
+            if (session is not null)
+                this.UpdateDiveSlapFish(session);
+
             foreach (var particle in this.burstParticles)
             {
                 particle.WorldPos += particle.Velocity;
@@ -293,6 +299,9 @@ namespace FishSlapper.Rendering
         {
             if (session is null)
                 this.diveRenderFarmer = null;
+
+            if (session is not null && session.State is DiveSlapState.Slapping or DiveSlapState.ResolveSuccess)
+                this.DrawDiveSlapFish(e.SpriteBatch, session);
 
             if (session is not null && session.State == DiveSlapState.ResolveFail)
                 this.DrawFailRetaliationFish(e.SpriteBatch, session);
@@ -699,6 +708,31 @@ namespace FishSlapper.Rendering
             );
         }
 
+        private void DrawDiveSlapFish(SpriteBatch spriteBatch, DiveSlapSession session)
+        {
+            if (string.IsNullOrWhiteSpace(session.TargetFishQualifiedItemId))
+                return;
+
+            var fishData = ItemRegistry.GetMetadata(session.TargetFishQualifiedItemId).GetParsedOrErrorData();
+            Texture2D fishTexture = fishData.GetTexture();
+            Rectangle fishSourceRect = fishData.GetSourceRect(0, null);
+            Vector2 worldPos = GetDiveSlapFishWorldPosition(session);
+            Vector2 screenPos = Game1.GlobalToLocal(Game1.viewport, worldPos);
+            Vector2 origin = new(fishSourceRect.Width / 2f, fishSourceRect.Height / 2f);
+
+            spriteBatch.Draw(
+                fishTexture,
+                screenPos,
+                fishSourceRect,
+                Color.White,
+                session.SlapFishRotation,
+                origin,
+                SlapFishScale,
+                SpriteEffects.None,
+                1f
+            );
+        }
+
         private void DrawDiveSlapPrompt(SpriteBatch spriteBatch, string promptText)
         {
             this.EnsurePixelTexture();
@@ -741,6 +775,78 @@ namespace FishSlapper.Rendering
                 ? 1f
                 : 1f - (float)session.PhaseTicksRemaining / session.PhaseDurationTicks;
             return MathHelper.Clamp(progress, 0f, 1f);
+        }
+
+        private void StartDiveSlapFishJump(DiveSlapSession session)
+        {
+            session.SlapFishOffsetX = 0f;
+            session.SlapFishOffsetY = 0f;
+            session.SlapFishRotation = 0f;
+            session.SlapFishVelocityX = (float)(this.rng.NextDouble() * (CaughtFishMaxHorizontalTwitchVelocity * 2f) - CaughtFishMaxHorizontalTwitchVelocity);
+            session.SlapFishVelocityY = CaughtFishInitialJumpVelocity;
+            session.SlapFishRotationVelocity = session.SlapFishVelocityX * 0.065f;
+            session.SlapFishBouncesRemaining = 1;
+            this.SpawnSplashParticles(session.SlapFishSurfacePosition);
+        }
+
+        private void UpdateDiveSlapFish(DiveSlapSession session)
+        {
+            if (!IsDiveSlapFishAnimationActive(session))
+                return;
+
+            float previousOffsetY = session.SlapFishOffsetY;
+            session.SlapFishOffsetX += session.SlapFishVelocityX;
+            session.SlapFishOffsetY += session.SlapFishVelocityY;
+            session.SlapFishRotation += session.SlapFishRotationVelocity;
+            session.SlapFishVelocityX *= 0.72f;
+            session.SlapFishVelocityY += 1.1f;
+            session.SlapFishRotationVelocity *= 0.78f;
+
+            if (previousOffsetY < 0f && session.SlapFishOffsetY >= 0f)
+            {
+                session.SlapFishOffsetY = 0f;
+                this.SpawnSplashParticles(session.SlapFishSurfacePosition);
+                if (session.SlapFishBouncesRemaining > 0)
+                {
+                    session.SlapFishVelocityY = CaughtFishBounceJumpVelocity;
+                    session.SlapFishRotationVelocity = -session.SlapFishRotationVelocity * 0.6f;
+                    session.SlapFishBouncesRemaining--;
+                }
+                else
+                {
+                    session.SlapFishVelocityY = 0f;
+                }
+            }
+
+            if (MathF.Abs(session.SlapFishOffsetX) < 0.05f && MathF.Abs(session.SlapFishVelocityX) < 0.05f)
+            {
+                session.SlapFishOffsetX = 0f;
+                session.SlapFishVelocityX = 0f;
+            }
+
+            if (MathF.Abs(session.SlapFishRotation) < 0.005f && MathF.Abs(session.SlapFishRotationVelocity) < 0.005f)
+            {
+                session.SlapFishRotation = 0f;
+                session.SlapFishRotationVelocity = 0f;
+            }
+        }
+
+        private static Vector2 GetDiveSlapFishWorldPosition(DiveSlapSession session)
+        {
+            float idleBobOffsetY = IsDiveSlapFishAnimationActive(session)
+                ? 0f
+                : -MathF.Sin((float)(Game1.currentGameTime.TotalGameTime.TotalMilliseconds / 220.0)) * SlapFishIdleBobAmplitude;
+            return session.SlapFishSurfacePosition + new Vector2(session.SlapFishOffsetX, session.SlapFishOffsetY + idleBobOffsetY);
+        }
+
+        private static bool IsDiveSlapFishAnimationActive(DiveSlapSession session)
+        {
+            return session.SlapFishVelocityX != 0f
+                || session.SlapFishVelocityY != 0f
+                || session.SlapFishOffsetX != 0f
+                || session.SlapFishOffsetY < 0f
+                || session.SlapFishRotation != 0f
+                || session.SlapFishRotationVelocity != 0f;
         }
 
         private static Vector2 GetFailRetaliationFishWorldPosition(DiveSlapSession session, float progress)
