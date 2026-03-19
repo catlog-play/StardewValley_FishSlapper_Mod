@@ -29,6 +29,11 @@ namespace FishSlapper.Gameplay
         private const float FailRetaliationImpactProgress = 0.52f;
         private static readonly FieldInfo? FishingRodChargeSoundField = typeof(FishingRod).GetField("chargeSound", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
         private static readonly FieldInfo? FishingRodReelSoundField = typeof(FishingRod).GetField("reelSound", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+        private static readonly FieldInfo? FishingRodHadBobberField = typeof(FishingRod).GetField("hadBobber", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        private static readonly FieldInfo? FishingRodPlayerAdjustedBobberField = typeof(FishingRod).GetField("_hasPlayerAdjustedBobber", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        private static readonly FieldInfo? FishingRodBobberBobField = typeof(FishingRod).GetField("bobberBob", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        private static readonly FieldInfo? FishingRodBobberTimeAccumulatorField = typeof(FishingRod).GetField("bobberTimeAccumulator", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        private static readonly FieldInfo? FishingRodTimePerBobberBobField = typeof(FishingRod).GetField("timePerBobberBob", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
         private static readonly FieldInfo? BobberBarReelSoundField = typeof(BobberBar).GetField("reelSound", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
         private static readonly FieldInfo? BobberBarUnReelSoundField = typeof(BobberBar).GetField("unReelSound", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
 
@@ -569,6 +574,7 @@ namespace FishSlapper.Gameplay
 
             DiveSlapSession completedSession = this.activeSession;
             StopFishingRodLoopingAudio(completedSession.Rod);
+            ResetFishingRodPostDiveVisualState(completedSession.Rod);
             this.RestorePlayerFromDive(completedSession);
             this.activeSession = null;
             this.ApplyDiveCostOnReturn();
@@ -580,6 +586,7 @@ namespace FishSlapper.Gameplay
                 return;
 
             StopFishingRodLoopingAudio(this.activeSession.Rod);
+            ResetFishingRodPostDiveVisualState(this.activeSession.Rod);
             this.RestorePlayerFromDive(this.activeSession);
             this.activeSession = null;
         }
@@ -592,6 +599,20 @@ namespace FishSlapper.Gameplay
             StopFishingRodCue(BobberBarUnReelSoundField);
         }
 
+        private static void ResetFishingRodPostDiveVisualState(FishingRod rod)
+        {
+            rod.bobber.Set(Vector2.Zero);
+            rod.castedButBobberStillInAir = false;
+            rod.pullingOutOfWater = false;
+            Game1.player.armOffset = Vector2.Zero;
+
+            SetFishingRodFieldValue(FishingRodHadBobberField, rod, false);
+            SetFishingRodFieldValue(FishingRodPlayerAdjustedBobberField, rod, false);
+            SetFishingRodFieldValue(FishingRodBobberBobField, rod, 0);
+            SetFishingRodFieldValue(FishingRodBobberTimeAccumulatorField, rod, 0f);
+            SetFishingRodFieldValue(FishingRodTimePerBobberBobField, rod, 0f);
+        }
+
         private static void StopFishingRodCue(FieldInfo? cueField)
         {
             if (cueField?.GetValue(null) is not ICue cue)
@@ -601,6 +622,11 @@ namespace FishSlapper.Gameplay
                 cue.Stop(AudioStopOptions.Immediate);
 
             cueField.SetValue(null, null);
+        }
+
+        private static void SetFishingRodFieldValue<T>(FieldInfo? field, FishingRod rod, T value)
+        {
+            field?.SetValue(rod, value);
         }
 
         private void ApplyDiveCostOnReturn()
