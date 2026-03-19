@@ -28,6 +28,7 @@ namespace FishSlapper.Rendering
         private const int DiveSlapMoveRightFrame = 136;
         private const int DiveSlapMoveUpFrame = 144;
         private const int DiveSlapMoveLeftFrame = 152;
+        private const int DiveSuccessHoldDownFrame = 96;
         // 原版 FarmerSprite 没有独立的 standDown 常量，静止朝下就是 frame 0。
         private const int FarmerIdleDownFrame = 0;
         private const int FarmerStandDownFrame = 0;
@@ -45,6 +46,7 @@ namespace FishSlapper.Rendering
         private const float FailRetaliationImpactProgress = 0.52f;
         private const float SlapFishScale = 4f;
         private const float SlapFishIdleBobAmplitude = 2.5f;
+        private const float DiveSuccessHeldFishScale = 4f;
         private const float FailRetaliationFishScale = 4f;
 
         private const float HudBarWidth = 120f;
@@ -309,8 +311,11 @@ namespace FishSlapper.Rendering
             if (session is null)
                 this.diveRenderFarmer = null;
 
-            if (session is not null && session.State is DiveSlapState.Slapping or DiveSlapState.ResolveSuccess)
+            if (session is not null && session.State == DiveSlapState.Slapping)
                 this.DrawDiveSlapFish(e.SpriteBatch, session);
+
+            if (session is not null && IsDiveSuccessHeldFishVisible(session))
+                this.DrawDiveSuccessHeldFish(e.SpriteBatch, session);
 
             if (session is not null && session.State == DiveSlapState.ResolveFail)
                 this.DrawFailRetaliationFish(e.SpriteBatch, session);
@@ -517,12 +522,26 @@ namespace FishSlapper.Rendering
             // 这样能吃到原版的环境着色、图层和农夫外观，但不会干扰玩家真实位置和碰撞。
             renderFarmer.currentLocation = Game1.currentLocation;
             renderFarmer.Position = session.RenderPosition;
-            renderFarmer.faceDirection(GetDiveFacingDirection(session));
+            if (session.State == DiveSlapState.ResolveSuccess)
+            {
+                renderFarmer.Halt();
+                renderFarmer.faceDirection(2);
+            }
+            else
+            {
+                renderFarmer.faceDirection(GetDiveFacingDirection(session));
+            }
             renderFarmer.UsingTool = false;
             renderFarmer.canReleaseTool = false;
             renderFarmer.swimming.Value = ShouldRenderDiveAsSwimming(session);
             renderFarmer.bathingClothes.Value = renderFarmer.swimming.Value;
             renderFarmer.yOffset = 0f;
+
+            if (session.State == DiveSlapState.ResolveSuccess)
+            {
+                this.ApplyCarryHoldPose(renderFarmer);
+                return renderFarmer;
+            }
 
             int frame = GetDiveFrame(session);
             this.ApplyPose(renderFarmer, frame);
@@ -536,6 +555,14 @@ namespace FishSlapper.Rendering
             farmer.FarmerSprite.StopAnimation();
             farmer.FarmerSprite.ClearAnimation();
             farmer.FarmerSprite.setCurrentFrame(frame, 0, 0, 1, false, false);
+        }
+
+        private void ApplyCarryHoldPose(Farmer farmer)
+        {
+            farmer.completelyStopAnimatingOrDoingAction();
+            farmer.FarmerSprite.StopAnimation();
+            farmer.FarmerSprite.ClearAnimation();
+            farmer.FarmerSprite.setCurrentFrame(DiveSuccessHoldDownFrame, 1);
         }
 
         private void UpdateSwimShadowAnimation(DiveSlapSession? session)
@@ -596,6 +623,7 @@ namespace FishSlapper.Rendering
                 DiveSlapState.Returning => GetDiveMoveFrame(facingDirection),
                 DiveSlapState.Slapping when session.SlapAnimationTicksRemaining > 0 => session.FacingRight ? DiveSlapPunchRightFrame : DiveSlapPunchLeftFrame,
                 DiveSlapState.Slapping => FarmerIdleDownFrame,
+                DiveSlapState.ResolveSuccess => DiveSuccessHoldDownFrame,
                 DiveSlapState.ResolveFailPauseBefore => FarmerIdleDownFrame,
                 DiveSlapState.ResolveFail => FarmerIdleDownFrame,
                 DiveSlapState.ResolveFailPauseAfter => FarmerIdleDownFrame,
@@ -630,6 +658,9 @@ namespace FishSlapper.Rendering
             if (session.State == DiveSlapState.Slapping && session.SlapAnimationTicksRemaining > 0)
                 return session.FacingRight ? 1 : 3;
 
+            if (session.State == DiveSlapState.ResolveSuccess)
+                return 2;
+
             return session.State == DiveSlapState.Returning
                 ? GetOppositeFacingDirection(session.CastFacingDirection)
                 : session.CastFacingDirection;
@@ -643,7 +674,6 @@ namespace FishSlapper.Rendering
         private static bool ShouldRenderDiveAsSwimming(DiveSlapSession session)
         {
             return session.State is DiveSlapState.Slapping
-                or DiveSlapState.ResolveSuccess
                 or DiveSlapState.ResolveFailPauseBefore
                 or DiveSlapState.ResolveFail
                 or DiveSlapState.ResolveFailPauseAfter;
@@ -665,7 +695,11 @@ namespace FishSlapper.Rendering
             if (rod.whichFish is null || rod.fishSize == -1)
                 return 0f;
 
-            string? itemId = rod.whichFish.QualifiedItemId;
+            return GetHeldFishBaseRotation(rod.whichFish.QualifiedItemId);
+        }
+
+        private static float GetHeldFishBaseRotation(string? itemId)
+        {
             return itemId is not "(O)800" and not "(O)798" and not "(O)149" and not "(O)151"
                 ? 2.3561945f
                 : 0f;
@@ -793,6 +827,30 @@ namespace FishSlapper.Rendering
             );
         }
 
+        private void DrawDiveSuccessHeldFish(SpriteBatch spriteBatch, DiveSlapSession session)
+        {
+            if (string.IsNullOrWhiteSpace(session.TargetFishQualifiedItemId))
+                return;
+
+            var fishData = ItemRegistry.GetMetadata(session.TargetFishQualifiedItemId).GetParsedOrErrorData();
+            Texture2D fishTexture = fishData.GetTexture();
+            Rectangle fishSourceRect = fishData.GetSourceRect(0, null);
+            Vector2 screenPos = Game1.GlobalToLocal(Game1.viewport, GetDiveSuccessHeldFishWorldPosition(session));
+            Vector2 origin = new(fishSourceRect.Width / 2f, fishSourceRect.Height / 2f);
+
+            spriteBatch.Draw(
+                fishTexture,
+                screenPos,
+                fishSourceRect,
+                Color.White,
+                GetHeldFishBaseRotation(session.TargetFishQualifiedItemId) - MathF.PI / 2f,
+                origin,
+                DiveSuccessHeldFishScale,
+                SpriteEffects.None,
+                1f
+            );
+        }
+
         private void DrawDiveSlapPrompt(SpriteBatch spriteBatch, string promptText)
         {
             this.EnsurePixelTexture();
@@ -907,6 +965,17 @@ namespace FishSlapper.Rendering
                 ? 0f
                 : -MathF.Sin((float)(Game1.currentGameTime.TotalGameTime.TotalMilliseconds / 220.0)) * SlapFishIdleBobAmplitude;
             return session.SlapFishSurfacePosition + new Vector2(session.SlapFishOffsetX, session.SlapFishOffsetY + idleBobOffsetY);
+        }
+
+        private static Vector2 GetDiveSuccessHeldFishWorldPosition(DiveSlapSession session)
+        {
+            return session.RenderPosition + new Vector2(32f, -90f);
+        }
+
+        private static bool IsDiveSuccessHeldFishVisible(DiveSlapSession session)
+        {
+            return session.State == DiveSlapState.ResolveSuccess
+                || (session.State == DiveSlapState.Returning && !session.OutcomeApplied);
         }
 
         private static bool IsDiveSlapFishAnimationActive(DiveSlapSession session)

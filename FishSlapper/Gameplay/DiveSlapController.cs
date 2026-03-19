@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Reflection;
+using Microsoft.Xna.Framework.Audio;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using StardewModdingAPI;
@@ -16,15 +18,19 @@ namespace FishSlapper.Gameplay
         private const int DiveSlapHealthCost = 20;
         private const float DiveSlapStaminaCost = 50f;
         private const int WindupTicks = 8;
-        private const int DivingTicks = 36;
-        private const int ResolveTicks = 8;
+        private const int DivingTicks = 45;
+        private const int ResolveSuccessTicks = 60;
         private const int FailRetaliationDelayTicks = 30;
         private const int FailRetaliationTicks = 56;
         private const int FailRetaliationRecoveryTicks = 60;
-        private const int ReturningTicks = 36;
+        private const int ReturningTicks = 45;
         private const float DiveArcHeight = 72f;
         private const float ReturnArcHeight = 56f;
         private const float FailRetaliationImpactProgress = 0.52f;
+        private static readonly FieldInfo? FishingRodChargeSoundField = typeof(FishingRod).GetField("chargeSound", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+        private static readonly FieldInfo? FishingRodReelSoundField = typeof(FishingRod).GetField("reelSound", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+        private static readonly FieldInfo? BobberBarReelSoundField = typeof(BobberBar).GetField("reelSound", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+        private static readonly FieldInfo? BobberBarUnReelSoundField = typeof(BobberBar).GetField("unReelSound", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
 
         private readonly IModHelper helper;
         private readonly IMonitor monitor;
@@ -117,6 +123,7 @@ namespace FishSlapper.Gameplay
                 return;
 
             this.activeSession = session;
+            StopFishingRodLoopingAudio(session.Rod);
             this.LockPlayerForDive(session);
             this.BeginPhase(session, DiveSlapState.Windup, WindupTicks, session.OriginalPlayerPosition, session.OriginalPlayerPosition);
             this.monitor.Log("Started dive slap session.", LogLevel.Trace);
@@ -179,14 +186,14 @@ namespace FishSlapper.Gameplay
                 case DiveSlapState.ResolveSuccess:
                     if (this.AdvancePhase(this.activeSession))
                     {
-                        this.BeginPhase(
-                            this.activeSession,
-                            DiveSlapState.Returning,
-                            ReturningTicks,
-                            this.activeSession.RenderPosition,
-                            this.activeSession.OriginalPlayerPosition
-                        );
-                        this.renderer.PlayDiveWaterExit();
+                        if (!this.activeSession.OutcomeApplied)
+                        {
+                            this.vanillaBridge.ApplySuccess(this.activeSession);
+                            this.ShowDiveSuccessMessage(this.activeSession);
+                            this.activeSession.OutcomeApplied = true;
+                        }
+
+                        this.EndSession();
                     }
                     break;
 
@@ -246,7 +253,22 @@ namespace FishSlapper.Gameplay
 
                 case DiveSlapState.Returning:
                     if (this.AdvancePhase(this.activeSession))
-                        this.EndSession();
+                    {
+                        if (!this.activeSession.OutcomeApplied)
+                        {
+                            this.BeginPhase(
+                                this.activeSession,
+                                DiveSlapState.ResolveSuccess,
+                                ResolveSuccessTicks,
+                                this.activeSession.RenderPosition,
+                                this.activeSession.RenderPosition
+                            );
+                        }
+                        else
+                        {
+                            this.EndSession();
+                        }
+                    }
                     break;
             }
         }
@@ -315,18 +337,24 @@ namespace FishSlapper.Gameplay
 
         private void BeginResolveSuccess(DiveSlapSession session)
         {
-            this.BeginPhase(session, DiveSlapState.ResolveSuccess, ResolveTicks, session.RenderPosition, session.RenderPosition);
+            ResetDiveSlapFishState(session);
+            StopFishingRodLoopingAudio(session.Rod);
+            if (ReferenceEquals(Game1.activeClickableMenu, session.BobberBar))
+                Game1.activeClickableMenu = null;
 
-            if (!session.OutcomeApplied)
-            {
-                this.vanillaBridge.ApplySuccess(session);
-                this.ShowDiveSuccessMessage(session);
-                session.OutcomeApplied = true;
-            }
+            this.BeginPhase(
+                session,
+                DiveSlapState.Returning,
+                ReturningTicks,
+                session.RenderPosition,
+                session.OriginalPlayerPosition
+            );
+            this.renderer.PlayDiveWaterExit();
         }
 
         private void BeginResolveFail(DiveSlapSession session)
         {
+            StopFishingRodLoopingAudio(session.Rod);
             session.FailRetaliationImpactTriggered = false;
             this.BeginPhase(
                 session,
@@ -490,6 +518,17 @@ namespace FishSlapper.Gameplay
             return fishData.DisplayName ?? rod.whichFish.QualifiedItemId ?? "???";
         }
 
+        private static void ResetDiveSlapFishState(DiveSlapSession session)
+        {
+            session.SlapFishOffsetX = 0f;
+            session.SlapFishOffsetY = 0f;
+            session.SlapFishRotation = 0f;
+            session.SlapFishVelocityX = 0f;
+            session.SlapFishVelocityY = 0f;
+            session.SlapFishRotationVelocity = 0f;
+            session.SlapFishBouncesRemaining = 0;
+        }
+
         private void LockPlayerForDive(DiveSlapSession session)
         {
             // 玩家逻辑上仍留在岸边，只是在渲染层替换成跳水分身。
@@ -529,6 +568,7 @@ namespace FishSlapper.Gameplay
                 return;
 
             DiveSlapSession completedSession = this.activeSession;
+            StopFishingRodLoopingAudio(completedSession.Rod);
             this.RestorePlayerFromDive(completedSession);
             this.activeSession = null;
             this.ApplyDiveCostOnReturn();
@@ -539,8 +579,28 @@ namespace FishSlapper.Gameplay
             if (this.activeSession is null)
                 return;
 
+            StopFishingRodLoopingAudio(this.activeSession.Rod);
             this.RestorePlayerFromDive(this.activeSession);
             this.activeSession = null;
+        }
+
+        private static void StopFishingRodLoopingAudio(FishingRod rod)
+        {
+            StopFishingRodCue(FishingRodChargeSoundField);
+            StopFishingRodCue(FishingRodReelSoundField);
+            StopFishingRodCue(BobberBarReelSoundField);
+            StopFishingRodCue(BobberBarUnReelSoundField);
+        }
+
+        private static void StopFishingRodCue(FieldInfo? cueField)
+        {
+            if (cueField?.GetValue(null) is not ICue cue)
+                return;
+
+            if (cue.IsPlaying)
+                cue.Stop(AudioStopOptions.Immediate);
+
+            cueField.SetValue(null, null);
         }
 
         private void ApplyDiveCostOnReturn()
