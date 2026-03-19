@@ -68,6 +68,14 @@ namespace FishSlapper
                 }
             );
 
+            configMenu.AddBoolOption(
+                mod: this.ModManifest,
+                getValue: () => this.Config.HideKeyPrompts,
+                setValue: value => this.Config.HideKeyPrompts = value,
+                name: () => this.Helper.Translation.Get("config.hide-key-prompts.name"),
+                tooltip: () => this.Helper.Translation.Get("config.hide-key-prompts.tooltip")
+            );
+
             configMenu.AddKeybindList(
                 mod: this.ModManifest,
                 getValue: () => this.Config.SlapKey,
@@ -121,7 +129,7 @@ namespace FishSlapper
 
         private void OnRenderedWorld(object? sender, RenderedWorldEventArgs e)
         {
-            string? slapKey = this.Controller.GetSlapKeyHint();
+            string? slapKey = this.Config.HideKeyPrompts ? null : this.Controller.GetSlapKeyHint();
             string? slapPrompt = slapKey is not null
                 ? this.Helper.Translation.Get("hud.slap-prompt", new { key = slapKey }).ToString()
                 : null;
@@ -130,7 +138,7 @@ namespace FishSlapper
 
         private void OnRenderedActiveMenu(object? sender, RenderedActiveMenuEventArgs e)
         {
-            string? keyHint = this.Controller.GetDiveSlapKeyHint();
+            string? keyHint = this.Config.HideKeyPrompts ? null : this.Controller.GetDiveSlapKeyHint();
             string? promptText = keyHint is not null
                 ? this.Helper.Translation.Get("hud.dive-slap-prompt", new { key = keyHint }).ToString()
                 : null;

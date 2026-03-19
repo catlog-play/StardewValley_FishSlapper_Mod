@@ -596,7 +596,9 @@ namespace FishSlapper.Rendering
                 DiveSlapState.Returning => GetDiveMoveFrame(facingDirection),
                 DiveSlapState.Slapping when session.SlapAnimationTicksRemaining > 0 => session.FacingRight ? DiveSlapPunchRightFrame : DiveSlapPunchLeftFrame,
                 DiveSlapState.Slapping => FarmerIdleDownFrame,
+                DiveSlapState.ResolveFailPauseBefore => FarmerIdleDownFrame,
                 DiveSlapState.ResolveFail => FarmerIdleDownFrame,
+                DiveSlapState.ResolveFailPauseAfter => FarmerIdleDownFrame,
                 _ => GetDiveIdleFrame(facingDirection)
             };
         }
@@ -640,7 +642,11 @@ namespace FishSlapper.Rendering
 
         private static bool ShouldRenderDiveAsSwimming(DiveSlapSession session)
         {
-            return session.State is DiveSlapState.Slapping or DiveSlapState.ResolveSuccess or DiveSlapState.ResolveFail;
+            return session.State is DiveSlapState.Slapping
+                or DiveSlapState.ResolveSuccess
+                or DiveSlapState.ResolveFailPauseBefore
+                or DiveSlapState.ResolveFail
+                or DiveSlapState.ResolveFailPauseAfter;
         }
 
         private static int GetOppositeFacingDirection(int facingDirection)

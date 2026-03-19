@@ -85,7 +85,13 @@ namespace FishSlapper.Vanilla
         {
             return session is not null
                 && ReferenceEquals(session.BobberBar, bobberBar)
-                && session.State is DiveSlapState.Windup or DiveSlapState.Diving or DiveSlapState.Slapping or DiveSlapState.ResolveSuccess or DiveSlapState.ResolveFail;
+                && session.State is DiveSlapState.Windup
+                    or DiveSlapState.Diving
+                    or DiveSlapState.Slapping
+                    or DiveSlapState.ResolveSuccess
+                    or DiveSlapState.ResolveFailPauseBefore
+                    or DiveSlapState.ResolveFail
+                    or DiveSlapState.ResolveFailPauseAfter;
         }
 
         public void ApplySuccess(DiveSlapSession session)

@@ -18,7 +18,9 @@ namespace FishSlapper.Gameplay
         private const int WindupTicks = 8;
         private const int DivingTicks = 36;
         private const int ResolveTicks = 8;
+        private const int FailRetaliationDelayTicks = 30;
         private const int FailRetaliationTicks = 56;
+        private const int FailRetaliationRecoveryTicks = 60;
         private const int ReturningTicks = 36;
         private const float DiveArcHeight = 72f;
         private const float ReturnArcHeight = 56f;
@@ -30,6 +32,16 @@ namespace FishSlapper.Gameplay
         private readonly VanillaFishingBridge vanillaBridge;
         private ModConfig config;
         private DiveSlapSession? activeSession;
+        private CaughtFishSlapSummary? activeCaughtFishSlapSummary;
+        private int worldTickCounter;
+
+        private sealed class CaughtFishSlapSummary
+        {
+            public FishingRod Rod { get; set; } = null!;
+            public string FishDisplayName { get; set; } = "???";
+            public int FirstSlapTick { get; set; }
+            public int SlapCount { get; set; }
+        }
 
         public DiveSlapController(
             IModHelper helper,
@@ -90,8 +102,9 @@ namespace FishSlapper.Gameplay
                 return;
             }
 
-            if (this.config.SlapKey.JustPressed() && this.vanillaBridge.TryGetCaughtFishRod(out _))
+            if (this.config.SlapKey.JustPressed() && this.vanillaBridge.TryGetCaughtFishRod(out FishingRod? caughtFishRod) && caughtFishRod is not null)
             {
+                this.RecordCaughtFishSlap(caughtFishRod);
                 this.renderer.PlayCaughtFishSlap();
                 this.helper.Input.Suppress(e.Button);
                 return;
@@ -112,6 +125,16 @@ namespace FishSlapper.Gameplay
 
         public void OnUpdateTicked()
         {
+            if (Context.IsWorldReady)
+            {
+                this.worldTickCounter++;
+                this.UpdateCaughtFishSlapSummary();
+            }
+            else
+            {
+                this.CompleteCaughtFishSlapSummary(showMessage: false);
+            }
+
             this.renderer.OnUpdateTicked(this.activeSession);
 
             if (this.activeSession is null)
@@ -167,6 +190,20 @@ namespace FishSlapper.Gameplay
                     }
                     break;
 
+                case DiveSlapState.ResolveFailPauseBefore:
+                    if (this.AdvancePhase(this.activeSession))
+                    {
+                        this.BeginPhase(
+                            this.activeSession,
+                            DiveSlapState.ResolveFail,
+                            FailRetaliationTicks,
+                            this.activeSession.RenderPosition,
+                            this.activeSession.RenderPosition
+                        );
+                        this.renderer.PlayDiveRetaliationLaunch(this.activeSession.FailRetaliationStartPosition);
+                    }
+                    break;
+
                 case DiveSlapState.ResolveFail:
                     bool failPhaseFinished = this.AdvancePhase(this.activeSession);
                     if (!this.activeSession.FailRetaliationImpactTriggered
@@ -183,6 +220,19 @@ namespace FishSlapper.Gameplay
                             this.activeSession.OutcomeApplied = true;
                         }
 
+                        this.BeginPhase(
+                            this.activeSession,
+                            DiveSlapState.ResolveFailPauseAfter,
+                            FailRetaliationRecoveryTicks,
+                            this.activeSession.RenderPosition,
+                            this.activeSession.RenderPosition
+                        );
+                    }
+                    break;
+
+                case DiveSlapState.ResolveFailPauseAfter:
+                    if (this.AdvancePhase(this.activeSession))
+                    {
                         this.BeginPhase(
                             this.activeSession,
                             DiveSlapState.Returning,
@@ -206,7 +256,11 @@ namespace FishSlapper.Gameplay
             if (this.activeSession is null || !ReferenceEquals(e.OldMenu, this.activeSession.BobberBar))
                 return;
 
-            if (this.activeSession.State is DiveSlapState.ResolveSuccess or DiveSlapState.ResolveFail or DiveSlapState.Returning)
+            if (this.activeSession.State is DiveSlapState.ResolveSuccess
+                or DiveSlapState.ResolveFailPauseBefore
+                or DiveSlapState.ResolveFail
+                or DiveSlapState.ResolveFailPauseAfter
+                or DiveSlapState.Returning)
                 return;
 
             this.monitor.Log("Cancelled dive slap session because the BobberBar closed unexpectedly.", LogLevel.Trace);
@@ -274,8 +328,13 @@ namespace FishSlapper.Gameplay
         private void BeginResolveFail(DiveSlapSession session)
         {
             session.FailRetaliationImpactTriggered = false;
-            this.BeginPhase(session, DiveSlapState.ResolveFail, FailRetaliationTicks, session.RenderPosition, session.RenderPosition);
-            this.renderer.PlayDiveRetaliationLaunch(session.FailRetaliationStartPosition);
+            this.BeginPhase(
+                session,
+                DiveSlapState.ResolveFailPauseBefore,
+                FailRetaliationDelayTicks,
+                session.RenderPosition,
+                session.RenderPosition
+            );
         }
 
         private void BeginPhase(DiveSlapSession session, DiveSlapState state, int duration, Vector2 startPosition, Vector2 targetPosition)
@@ -318,8 +377,16 @@ namespace FishSlapper.Gameplay
         private void TriggerFailRetaliationImpact(DiveSlapSession session)
         {
             session.FailRetaliationImpactTriggered = true;
+            string playerName = string.IsNullOrWhiteSpace(Game1.player.Name) ? "Player" : Game1.player.Name;
             string retaliationText = this.helper.Translation
-                .Get("hud.dive-slap-retaliation", new { fish = session.TargetFishDisplayName })
+                .Get(
+                    "hud.dive-slap-retaliation",
+                    new
+                    {
+                        player = playerName,
+                        fish = session.TargetFishDisplayName
+                    }
+                )
                 .ToString();
             this.renderer.PlayDiveRetaliationImpact(session.FailRetaliationImpactPosition);
             Game1.addHUDMessage(HUDMessage.ForCornerTextbox(retaliationText));
@@ -330,11 +397,13 @@ namespace FishSlapper.Gameplay
             int elapsedTicks = Math.Max(1, session.TotalSlapTicks - session.RemainingSlapTicks);
             float elapsedSeconds = Math.Max(0.1f, elapsedTicks / 60f);
             string timeText = elapsedSeconds.ToString("0.0", CultureInfo.InvariantCulture);
+            string playerName = string.IsNullOrWhiteSpace(Game1.player.Name) ? "Player" : Game1.player.Name;
             string successText = this.helper.Translation
                 .Get(
                     "hud.dive-slap-success",
                     new
                     {
+                        player = playerName,
                         time = timeText,
                         fish = session.TargetFishDisplayName,
                         slap_num = session.CurrentHits
@@ -342,6 +411,83 @@ namespace FishSlapper.Gameplay
                 )
                 .ToString();
             Game1.addHUDMessage(HUDMessage.ForCornerTextbox(successText));
+        }
+
+        private void RecordCaughtFishSlap(FishingRod rod)
+        {
+            if (this.activeCaughtFishSlapSummary is not null && !ReferenceEquals(this.activeCaughtFishSlapSummary.Rod, rod))
+                this.CompleteCaughtFishSlapSummary(showMessage: true);
+
+            string fishDisplayName = ResolveCaughtFishDisplayName(rod);
+            if (this.activeCaughtFishSlapSummary is null)
+            {
+                this.activeCaughtFishSlapSummary = new CaughtFishSlapSummary
+                {
+                    Rod = rod,
+                    FishDisplayName = fishDisplayName,
+                    FirstSlapTick = this.worldTickCounter,
+                    SlapCount = 1
+                };
+                return;
+            }
+
+            this.activeCaughtFishSlapSummary.FishDisplayName = fishDisplayName;
+            this.activeCaughtFishSlapSummary.SlapCount++;
+        }
+
+        private void UpdateCaughtFishSlapSummary()
+        {
+            if (this.activeCaughtFishSlapSummary is null)
+                return;
+
+            if (ReferenceEquals(Game1.player.CurrentTool, this.activeCaughtFishSlapSummary.Rod) && this.activeCaughtFishSlapSummary.Rod.fishCaught)
+                return;
+
+            this.CompleteCaughtFishSlapSummary(showMessage: true);
+        }
+
+        private void CompleteCaughtFishSlapSummary(bool showMessage)
+        {
+            if (this.activeCaughtFishSlapSummary is null)
+                return;
+
+            CaughtFishSlapSummary summary = this.activeCaughtFishSlapSummary;
+            this.activeCaughtFishSlapSummary = null;
+            if (showMessage)
+                this.ShowCaughtFishSlapMessage(summary);
+        }
+
+        private void ShowCaughtFishSlapMessage(CaughtFishSlapSummary summary)
+        {
+            if (summary.SlapCount <= 0)
+                return;
+
+            int elapsedTicks = Math.Max(1, this.worldTickCounter - summary.FirstSlapTick);
+            float elapsedSeconds = Math.Max(0.1f, elapsedTicks / 60f);
+            string timeText = elapsedSeconds.ToString("0.0", CultureInfo.InvariantCulture);
+            string playerName = string.IsNullOrWhiteSpace(Game1.player.Name) ? "Player" : Game1.player.Name;
+            string successText = this.helper.Translation
+                .Get(
+                    "hud.caught-slap-success",
+                    new
+                    {
+                        player = playerName,
+                        time = timeText,
+                        fish = summary.FishDisplayName,
+                        slap_num = summary.SlapCount
+                    }
+                )
+                .ToString();
+            Game1.addHUDMessage(HUDMessage.ForCornerTextbox(successText));
+        }
+
+        private static string ResolveCaughtFishDisplayName(FishingRod rod)
+        {
+            if (rod.whichFish is null)
+                return "???";
+
+            var fishData = rod.whichFish.GetParsedOrErrorData();
+            return fishData.DisplayName ?? rod.whichFish.QualifiedItemId ?? "???";
         }
 
         private void LockPlayerForDive(DiveSlapSession session)

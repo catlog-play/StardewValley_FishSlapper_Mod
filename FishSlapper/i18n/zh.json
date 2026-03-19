@@ -3,8 +3,11 @@
   "config.slap-key.tooltip": "钓上鱼后按下此键扇鱼一巴掌。",
   "config.dive-slap-key.name": "跳水扇鱼按键",
   "config.dive-slap-key.tooltip": "钓鱼条出现时按下此键，触发跳水扇鱼。",
+  "config.hide-key-prompts.name": "隐藏按键提示",
+  "config.hide-key-prompts.tooltip": "隐藏钓鱼过程中出现的按键提示文字。",
   "hud.dive-slap-prompt": "按 [{{key}}] 跳水扇鱼！",
   "hud.slap-prompt": "按 [{{key}}] 扇鱼！",
-  "hud.dive-slap-retaliation": "你被{{fish}}嘲笑了并扇了你一巴掌。",
-  "hud.dive-slap-success": "你气急败坏地跳进水中，并在{{time}}秒内给{{fish}}来了{{slap_num}}个巴掌，成功把{{fish}}拍晕了！"
+  "hud.dive-slap-retaliation": "{{player}}被{{fish}}嘲笑了并扇了一巴掌。",
+  "hud.dive-slap-success": "{{player}}气急败坏地跳进水中，并在{{time}}秒内给{{fish}}来了{{slap_num}}个巴掌，成功把{{fish}}拍晕了！",
+  "hud.caught-slap-success": "{{player}}在{{time}}秒内给{{fish}}来了{{slap_num}}个巴掌"
 }
