@@ -5,6 +5,7 @@ using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
 using StardewModdingAPI;
 using StardewModdingAPI.Events;
+using StardewModdingAPI.Utilities;
 using StardewValley;
 using StardewValley.Menus;
 using StardewValley.Tools;
@@ -40,24 +41,32 @@ namespace FishSlapper.Gameplay
 
         private readonly IModHelper helper;
         private readonly IMonitor monitor;
+        private readonly string modUniqueId;
         private readonly DiveSlapRenderer renderer;
         private readonly VanillaFishingBridge vanillaBridge;
+        private readonly PerScreen<ScreenState> screenStates = new(() => new ScreenState());
+        private readonly Dictionary<long, DiveSlapVisualSnapshot> observedDiveStates = new();
         private ModConfig config;
-        private DiveSlapSession? activeSession;
-        private CaughtFishSlapSummary? activeCaughtFishSlapSummary;
-        private int worldTickCounter;
 
         private sealed class CaughtFishSlapSummary
         {
             public FishingRod Rod { get; set; } = null!;
             public string FishDisplayName { get; set; } = "???";
-            public int FirstSlapTick { get; set; }
+            public string PlayerName { get; set; } = "Player";
+            public uint FirstSlapTick { get; set; }
             public int SlapCount { get; set; }
+        }
+
+        private sealed class ScreenState
+        {
+            public DiveSlapSession? ActiveSession { get; set; }
+            public CaughtFishSlapSummary? ActiveCaughtFishSlapSummary { get; set; }
         }
 
         public DiveSlapController(
             IModHelper helper,
             IMonitor monitor,
+            string modUniqueId,
             ModConfig config,
             DiveSlapRenderer renderer,
             VanillaFishingBridge vanillaBridge
@@ -65,16 +74,18 @@ namespace FishSlapper.Gameplay
         {
             this.helper = helper;
             this.monitor = monitor;
+            this.modUniqueId = modUniqueId;
             this.config = config;
             this.renderer = renderer;
             this.vanillaBridge = vanillaBridge;
+            this.LogMissingReflectionBindings();
         }
 
-        public DiveSlapSession? ActiveSession => this.activeSession;
+        public DiveSlapSession? ActiveSession => this.screenStates.Value.ActiveSession;
 
         public string? GetDiveSlapKeyHint()
         {
-            if (this.activeSession is not null)
+            if (this.ActiveSession is not null)
                 return null;
             if (Game1.activeClickableMenu is not BobberBar)
                 return null;
@@ -83,32 +94,39 @@ namespace FishSlapper.Gameplay
 
         public string? GetSlapKeyHint()
         {
-            if (this.activeSession is not null)
-                return this.activeSession.State == DiveSlapState.Slapping
+            Farmer? player = Game1.player;
+            if (player is null)
+                return null;
+
+            if (this.ActiveSession is not null)
+                return this.ActiveSession.State == DiveSlapState.Slapping
                     ? this.config.SlapKey.ToString()
                     : null;
 
-            return this.vanillaBridge.TryGetCaughtFishRod(out _)
+            return this.vanillaBridge.TryGetCaughtFishRod(player, out _)
                 ? this.config.SlapKey.ToString()
                 : null;
         }
 
         public bool CanUseMobileDiveButton()
         {
+            Farmer? player = Game1.player;
             return Context.IsWorldReady
-                && this.activeSession is null
-                && this.vanillaBridge.CanCreateDiveSession();
+                && player is not null
+                && this.ActiveSession is null
+                && this.vanillaBridge.CanCreateDiveSession(player, Game1.activeClickableMenu);
         }
 
         public bool CanUseMobileSlapButton()
         {
-            if (!Context.IsWorldReady)
+            Farmer? player = Game1.player;
+            if (!Context.IsWorldReady || player is null)
                 return false;
 
-            if (this.activeSession is not null)
-                return this.activeSession.State == DiveSlapState.Slapping;
+            if (this.ActiveSession is not null)
+                return this.ActiveSession.State == DiveSlapState.Slapping;
 
-            return this.vanillaBridge.TryGetCaughtFishRod(out _);
+            return this.vanillaBridge.TryGetCaughtFishRod(player, out _);
         }
 
         public bool TryUseMobileDiveButton()
@@ -121,7 +139,7 @@ namespace FishSlapper.Gameplay
             if (!Context.IsWorldReady)
                 return false;
 
-            if (this.activeSession is not null)
+            if (this.ActiveSession is not null)
                 return this.TryPerformDiveSessionSlap();
 
             return this.TryPerformCaughtFishSlap();
@@ -132,17 +150,12 @@ namespace FishSlapper.Gameplay
             this.config = config;
         }
 
-        public bool TryDrawCaughtFishPreview(FishingRod rod, SpriteBatch spriteBatch, Farmer farmer)
-        {
-            return this.renderer.TryDrawCaughtFishPreview(spriteBatch, farmer, rod);
-        }
-
         public void OnButtonPressed(ButtonPressedEventArgs e)
         {
             if (!Context.IsWorldReady)
                 return;
 
-            if (this.activeSession is not null)
+            if (this.ActiveSession is not null)
             {
                 this.HandleActiveSessionInput(e);
                 return;
@@ -158,170 +171,197 @@ namespace FishSlapper.Gameplay
                 this.helper.Input.Suppress(e.Button);
         }
 
-        public void OnUpdateTicked()
+        public void OnUpdateTicked(uint ticks)
         {
-            if (Context.IsWorldReady)
+            if (!Context.IsWorldReady)
             {
-                this.worldTickCounter++;
-                this.UpdateCaughtFishSlapSummary();
-            }
-            else
-            {
-                this.CompleteCaughtFishSlapSummary(showMessage: false);
+                this.ClearTransientState();
+                return;
             }
 
-            this.renderer.OnUpdateTicked(this.activeSession);
+            ScreenState state = this.screenStates.Value;
+            this.UpdateCaughtFishSlapSummary(state, ticks);
+            this.renderer.OnUpdateTicked(this.ActiveSession, ticks);
 
-            if (this.activeSession is null)
+            if (state.ActiveSession is null)
                 return;
 
             // 跳水扇鱼的主体状态机。这里只负责阶段推进，
             // 真正的原版结算桥接放在 VanillaFishingBridge 里。
-            switch (this.activeSession.State)
+            switch (state.ActiveSession.State)
             {
                 case DiveSlapState.Windup:
-                    if (this.AdvancePhase(this.activeSession))
+                    if (this.AdvancePhase(state.ActiveSession))
                     {
                         this.renderer.PlayDiveJump();
                         this.BeginPhase(
-                            this.activeSession,
+                            state.ActiveSession,
                             DiveSlapState.Diving,
                             DivingTicks,
-                            this.activeSession.OriginalPlayerPosition,
-                            this.vanillaBridge.GetDiveRenderTarget(this.activeSession)
+                            state.ActiveSession.OriginalPlayerPosition,
+                            this.vanillaBridge.GetDiveRenderTarget(state.ActiveSession)
                         );
                     }
                     break;
 
                 case DiveSlapState.Diving:
-                    if (this.AdvancePhase(this.activeSession))
+                    if (this.AdvancePhase(state.ActiveSession))
                     {
-                        this.activeSession.State = DiveSlapState.Slapping;
-                        this.activeSession.RenderPosition = this.activeSession.PhaseTargetPosition;
-                        this.activeSession.PhaseStartPosition = this.activeSession.PhaseTargetPosition;
-                        this.activeSession.PhaseTargetPosition = this.activeSession.PhaseTargetPosition;
-                        this.renderer.PlayDiveWaterEntry(this.activeSession.RenderPosition);
+                        state.ActiveSession.State = DiveSlapState.Slapping;
+                        state.ActiveSession.RenderPosition = state.ActiveSession.PhaseTargetPosition;
+                        state.ActiveSession.PhaseStartPosition = state.ActiveSession.PhaseTargetPosition;
+                        state.ActiveSession.PhaseTargetPosition = state.ActiveSession.PhaseTargetPosition;
+                        this.renderer.PlayDiveWaterEntry(state.ActiveSession.RenderPosition);
+                        this.BroadcastVisualEffect(
+                            state.ActiveSession,
+                            MultiplayerVisualEffectKind.PlayerDiveSplash,
+                            state.ActiveSession.RenderPosition
+                        );
                     }
                     break;
 
                 case DiveSlapState.Slapping:
-                    this.activeSession.RenderPosition = this.activeSession.PhaseTargetPosition;
-                    this.activeSession.RemainingSlapTicks--;
-                    if (this.activeSession.RemainingSlapTicks <= 0)
-                        this.BeginResolveFail(this.activeSession);
+                    state.ActiveSession.RenderPosition = state.ActiveSession.PhaseTargetPosition;
+                    state.ActiveSession.RemainingSlapTicks--;
+                    if (state.ActiveSession.RemainingSlapTicks <= 0)
+                        this.BeginResolveFail(state.ActiveSession);
                     break;
 
                 case DiveSlapState.ResolveSuccessPauseBefore:
-                    if (this.AdvancePhase(this.activeSession))
+                    if (this.AdvancePhase(state.ActiveSession))
                     {
                         this.BeginPhase(
-                            this.activeSession,
+                            state.ActiveSession,
                             DiveSlapState.Returning,
                             ReturningTicks,
-                            this.activeSession.RenderPosition,
-                            this.activeSession.OriginalPlayerPosition
+                            state.ActiveSession.RenderPosition,
+                            state.ActiveSession.OriginalPlayerPosition
                         );
-                        this.renderer.PlayDiveWaterExit(this.activeSession.RenderPosition);
+                        this.renderer.PlayDiveWaterExit(state.ActiveSession.RenderPosition);
+                        this.BroadcastVisualEffect(
+                            state.ActiveSession,
+                            MultiplayerVisualEffectKind.PlayerExitSplash,
+                            state.ActiveSession.RenderPosition
+                        );
                     }
                     break;
 
                 case DiveSlapState.ResolveSuccess:
-                    if (this.AdvancePhase(this.activeSession))
+                    if (this.AdvancePhase(state.ActiveSession))
                     {
-                        if (!this.activeSession.OutcomeApplied)
+                        if (!state.ActiveSession.OutcomeApplied)
                         {
-                            this.vanillaBridge.ApplySuccess(this.activeSession);
-                            this.ShowDiveSuccessMessage(this.activeSession);
-                            this.activeSession.OutcomeApplied = true;
+                            this.vanillaBridge.ApplySuccess(state.ActiveSession);
+                            this.ShowDiveSuccessMessage(state.ActiveSession);
+                            state.ActiveSession.OutcomeApplied = true;
                         }
 
-                        this.EndSession();
+                        this.EndSession(state);
                     }
                     break;
 
                 case DiveSlapState.ResolveFailPauseBefore:
-                    if (this.AdvancePhase(this.activeSession))
+                    if (this.AdvancePhase(state.ActiveSession))
                     {
                         this.BeginPhase(
-                            this.activeSession,
+                            state.ActiveSession,
                             DiveSlapState.ResolveFail,
                             FailRetaliationTicks,
-                            this.activeSession.RenderPosition,
-                            this.activeSession.RenderPosition
+                            state.ActiveSession.RenderPosition,
+                            state.ActiveSession.RenderPosition
                         );
-                        this.renderer.PlayDiveRetaliationLaunch(this.activeSession.FailRetaliationStartPosition);
+                        this.renderer.PlayDiveRetaliationLaunch(state.ActiveSession.FailRetaliationStartPosition);
+                        this.BroadcastVisualEffect(
+                            state.ActiveSession,
+                            MultiplayerVisualEffectKind.WaterSurfaceSplash,
+                            state.ActiveSession.FailRetaliationStartPosition
+                        );
                     }
                     break;
 
                 case DiveSlapState.ResolveFail:
-                    bool failPhaseFinished = this.AdvancePhase(this.activeSession);
-                    if (!this.activeSession.FailRetaliationImpactTriggered
-                        && (this.GetPhaseProgress(this.activeSession) >= FailRetaliationImpactProgress || failPhaseFinished))
+                    bool failPhaseFinished = this.AdvancePhase(state.ActiveSession);
+                    if (!state.ActiveSession.FailRetaliationImpactTriggered
+                        && (this.GetPhaseProgress(state.ActiveSession) >= FailRetaliationImpactProgress || failPhaseFinished))
                     {
-                        this.TriggerFailRetaliationImpact(this.activeSession);
+                        this.TriggerFailRetaliationImpact(state.ActiveSession);
                     }
 
                     if (failPhaseFinished)
                     {
-                        this.renderer.PlayDiveRetaliationSplashdown(this.activeSession.FailRetaliationExitPosition);
-                        if (!this.activeSession.OutcomeApplied)
+                        this.renderer.PlayDiveRetaliationSplashdown(state.ActiveSession.FailRetaliationExitPosition);
+                        this.BroadcastVisualEffect(
+                            state.ActiveSession,
+                            MultiplayerVisualEffectKind.WaterSurfaceSplash,
+                            state.ActiveSession.FailRetaliationExitPosition
+                        );
+                        if (!state.ActiveSession.OutcomeApplied)
                         {
-                            this.vanillaBridge.ApplyFailure(this.activeSession);
-                            this.activeSession.OutcomeApplied = true;
+                            this.vanillaBridge.ApplyFailure(state.ActiveSession);
+                            state.ActiveSession.OutcomeApplied = true;
                         }
 
                         this.BeginPhase(
-                            this.activeSession,
+                            state.ActiveSession,
                             DiveSlapState.ResolveFailPauseAfter,
                             FailRetaliationRecoveryTicks,
-                            this.activeSession.RenderPosition,
-                            this.activeSession.RenderPosition
+                            state.ActiveSession.RenderPosition,
+                            state.ActiveSession.RenderPosition
                         );
                     }
                     break;
 
                 case DiveSlapState.ResolveFailPauseAfter:
-                    if (this.AdvancePhase(this.activeSession))
+                    if (this.AdvancePhase(state.ActiveSession))
                     {
                         this.BeginPhase(
-                            this.activeSession,
+                            state.ActiveSession,
                             DiveSlapState.Returning,
                             ReturningTicks,
-                            this.activeSession.RenderPosition,
-                            this.activeSession.OriginalPlayerPosition
+                            state.ActiveSession.RenderPosition,
+                            state.ActiveSession.OriginalPlayerPosition
                         );
-                        this.renderer.PlayDiveWaterExit(this.activeSession.RenderPosition);
+                        this.renderer.PlayDiveWaterExit(state.ActiveSession.RenderPosition);
+                        this.BroadcastVisualEffect(
+                            state.ActiveSession,
+                            MultiplayerVisualEffectKind.PlayerExitSplash,
+                            state.ActiveSession.RenderPosition
+                        );
                     }
                     break;
 
                 case DiveSlapState.Returning:
-                    if (this.AdvancePhase(this.activeSession))
+                    if (this.AdvancePhase(state.ActiveSession))
                     {
-                        if (!this.activeSession.OutcomeApplied)
+                        if (!state.ActiveSession.OutcomeApplied)
                         {
                             this.BeginPhase(
-                                this.activeSession,
+                                state.ActiveSession,
                                 DiveSlapState.ResolveSuccess,
                                 ResolveSuccessTicks,
-                                this.activeSession.RenderPosition,
-                                this.activeSession.RenderPosition
+                                state.ActiveSession.RenderPosition,
+                                state.ActiveSession.RenderPosition
                             );
                         }
                         else
                         {
-                            this.EndSession();
+                            this.EndSession(state);
                         }
                     }
                     break;
             }
+
+            if (state.ActiveSession is not null)
+                this.BroadcastDiveSnapshot(state.ActiveSession);
         }
 
         public void OnMenuChanged(MenuChangedEventArgs e)
         {
-            if (this.activeSession is null || !ReferenceEquals(e.OldMenu, this.activeSession.BobberBar))
+            ScreenState state = this.screenStates.Value;
+            if (state.ActiveSession is null || !ReferenceEquals(e.OldMenu, state.ActiveSession.BobberBar))
                 return;
 
-            if (this.activeSession.State is DiveSlapState.ResolveSuccess
+            if (state.ActiveSession.State is DiveSlapState.ResolveSuccess
                 or DiveSlapState.ResolveSuccessPauseBefore
                 or DiveSlapState.ResolveFailPauseBefore
                 or DiveSlapState.ResolveFail
@@ -330,38 +370,142 @@ namespace FishSlapper.Gameplay
                 return;
 
             this.monitor.Log("Cancelled dive slap session because the BobberBar closed unexpectedly.", LogLevel.Trace);
-            this.CancelSession();
+            this.CancelSession(state);
         }
 
-        public bool TryDrawLocalPlayerReplacement(Farmer farmer, SpriteBatch spriteBatch)
+        public void OnModMessageReceived(ModMessageReceivedEventArgs e)
         {
-            return this.activeSession is not null
-                && ReferenceEquals(farmer, Game1.player)
-                && this.renderer.TryDrawDiveSession(spriteBatch, this.activeSession);
+            if (!Context.IsWorldReady || e.FromModID != this.modUniqueId)
+                return;
+
+            long currentPlayerId = Game1.player?.UniqueMultiplayerID ?? -1;
+            switch (e.Type)
+            {
+                case MultiplayerMessageTypes.DiveSlapSync:
+                    DiveSlapVisualSnapshot snapshot = e.ReadAs<DiveSlapVisualSnapshot>();
+                    if (snapshot.OwnerPlayerId == currentPlayerId)
+                        return;
+
+                    this.TryPlayObservedDiveFishSplash(snapshot);
+                    this.observedDiveStates[snapshot.OwnerPlayerId] = snapshot;
+                    break;
+
+                case MultiplayerMessageTypes.DiveSlapStop:
+                    DiveSlapStopMessage stopMessage = e.ReadAs<DiveSlapStopMessage>();
+                    this.observedDiveStates.Remove(stopMessage.OwnerPlayerId);
+                    this.renderer.RemovePlayerVisuals(stopMessage.OwnerPlayerId);
+                    break;
+
+                case MultiplayerMessageTypes.CaughtFishSlap:
+                    CaughtFishSlapVisualData visualData = e.ReadAs<CaughtFishSlapVisualData>();
+                    if (visualData.OwnerPlayerId == currentPlayerId)
+                        return;
+
+                    this.renderer.PlayCaughtFishSlap(visualData, playLocalEffects: false);
+                    break;
+
+                case MultiplayerMessageTypes.VisualEffect:
+                    MultiplayerVisualEffectData effectData = e.ReadAs<MultiplayerVisualEffectData>();
+                    if (effectData.OwnerPlayerId == currentPlayerId
+                        || !IsSameLocation(Game1.currentLocation?.NameOrUniqueName ?? string.Empty, effectData.LocationName))
+                    {
+                        return;
+                    }
+
+                    this.renderer.PlayObservedVisualEffect(effectData);
+                    break;
+
+                case MultiplayerMessageTypes.GlobalHudMessage:
+                    GlobalHudMessageData hudMessage = e.ReadAs<GlobalHudMessageData>();
+                    if (!string.IsNullOrWhiteSpace(hudMessage.Text))
+                        Game1.addHUDMessage(HUDMessage.ForCornerTextbox(hudMessage.Text));
+                    break;
+            }
         }
 
-        public bool ShouldHideCaughtFishToolPreview(Farmer farmer)
+        public void OnPeerDisconnected(PeerDisconnectedEventArgs e)
         {
-            return ReferenceEquals(farmer, Game1.player) && this.renderer.ShouldHideCaughtFishToolPreview;
+            this.observedDiveStates.Remove(e.Peer.PlayerID);
+            this.renderer.RemovePlayerVisuals(e.Peer.PlayerID);
+        }
+
+        public IEnumerable<DiveSlapVisualSnapshot> GetObservedDiveStatesForCurrentScreen()
+        {
+            string currentLocationName = Game1.currentLocation?.NameOrUniqueName ?? string.Empty;
+            long currentPlayerId = Game1.player?.UniqueMultiplayerID ?? -1;
+
+            foreach (var pair in this.screenStates.GetActiveValues())
+            {
+                ScreenState state = pair.Value;
+                if (state.ActiveSession is null
+                    || state.ActiveSession.OwnerPlayerId == currentPlayerId
+                    || !IsSameLocation(currentLocationName, state.ActiveSession.LocationName))
+                {
+                    continue;
+                }
+
+                yield return DiveSlapVisualSnapshot.FromState(state.ActiveSession);
+            }
+
+            foreach (DiveSlapVisualSnapshot snapshot in this.observedDiveStates.Values)
+            {
+                if (snapshot.OwnerPlayerId == currentPlayerId
+                    || !IsSameLocation(currentLocationName, snapshot.LocationName))
+                {
+                    continue;
+                }
+
+                yield return snapshot;
+            }
+        }
+
+        public bool TryDrawFarmerReplacement(Farmer farmer, SpriteBatch spriteBatch)
+        {
+            if (this.renderer.IsReplacementRenderFarmer(farmer))
+                return false;
+
+            if (this.TryGetDiveRenderState(farmer, out IDiveSlapRenderState? diveState) && diveState is not null)
+                return this.renderer.TryDrawDiveState(spriteBatch, farmer, diveState);
+
+            return this.renderer.TryDrawCaughtFishSlapReplacement(spriteBatch, farmer);
         }
 
         public bool ShouldSuppressToolDraw(Farmer farmer)
         {
-            if (ReferenceEquals(farmer, Game1.player) && this.activeSession is not null)
-                return true;
+            return this.renderer.ShouldSuppressToolDraw(farmer)
+                || this.renderer.HasCaughtFishSlapReplacement(farmer)
+                || this.TryGetDiveRenderState(farmer, out _);
+        }
 
-            return this.renderer.ShouldSuppressToolDraw(farmer);
+        public bool ShouldSuppressFishingRodDraw(FishingRod rod)
+        {
+            Farmer? owner = rod.lastUser;
+            if (owner is null)
+            {
+                foreach (Farmer farmer in Game1.getAllFarmers())
+                {
+                    if (ReferenceEquals(farmer.CurrentTool, rod))
+                    {
+                        owner = farmer;
+                        break;
+                    }
+                }
+            }
+
+            return owner is not null
+                && (this.renderer.HasCaughtFishSlapReplacement(owner)
+                    || this.TryGetDiveRenderState(owner, out _));
         }
 
         public bool ShouldFreezeBobberBarUpdate(BobberBar bobberBar)
         {
-            return this.vanillaBridge.ShouldFreezeBobberBarUpdate(bobberBar, this.activeSession);
+            return this.vanillaBridge.ShouldFreezeBobberBarUpdate(bobberBar, this.ActiveSession);
         }
 
         public bool ShouldSuppressBobberBarDraw(BobberBar bobberBar)
         {
-            return this.activeSession is not null
-                && ReferenceEquals(this.activeSession.BobberBar, bobberBar);
+            return this.ActiveSession is not null
+                && ReferenceEquals(this.ActiveSession.BobberBar, bobberBar);
         }
 
         private void HandleActiveSessionInput(ButtonPressedEventArgs e)
@@ -388,46 +532,64 @@ namespace FishSlapper.Gameplay
 
         private bool TryPerformCaughtFishSlap()
         {
-            if (!this.vanillaBridge.TryGetCaughtFishRod(out FishingRod? caughtFishRod) || caughtFishRod is null)
+            Farmer? player = Game1.player;
+            if (player is null || !this.vanillaBridge.TryGetCaughtFishRod(player, out FishingRod? caughtFishRod) || caughtFishRod is null)
                 return false;
 
-            this.RecordCaughtFishSlap(caughtFishRod);
-            this.renderer.PlayCaughtFishSlap();
+            ScreenState state = this.screenStates.Value;
+            this.RecordCaughtFishSlap(state, player, caughtFishRod);
+            CaughtFishSlapVisualData visualData = CreateCaughtFishVisualData(player, caughtFishRod);
+            this.renderer.PlayCaughtFishSlap(visualData, playLocalEffects: true);
+            this.BroadcastCaughtFishSlap(visualData);
+            this.BroadcastVisualEffect(
+                player.UniqueMultiplayerID,
+                visualData.LocationName,
+                MultiplayerVisualEffectKind.Burst,
+                player.Position + new Vector2(-16f, -64f)
+            );
             return true;
         }
 
         private bool TryStartDiveSlapSession()
         {
-            if (!this.vanillaBridge.TryCreateDiveSession(out DiveSlapSession? session) || session is null)
+            Farmer? player = Game1.player;
+            if (player is null || !this.vanillaBridge.TryCreateDiveSession(player, Game1.activeClickableMenu, out DiveSlapSession? session) || session is null)
                 return false;
 
-            this.activeSession = session;
-            StopFishingRodLoopingAudio(session.Rod);
+            this.screenStates.Value.ActiveSession = session;
+            StopFishingRodLoopingAudio();
             this.LockPlayerForDive(session);
             this.BeginPhase(session, DiveSlapState.Windup, WindupTicks, session.OriginalPlayerPosition, session.OriginalPlayerPosition);
+            this.BroadcastDiveSnapshot(session);
             this.monitor.Log("Started dive slap session.", LogLevel.Trace);
             return true;
         }
 
         private bool TryPerformDiveSessionSlap()
         {
-            if (this.activeSession is null || this.activeSession.State != DiveSlapState.Slapping)
+            if (this.ActiveSession is null || this.ActiveSession.State != DiveSlapState.Slapping)
                 return false;
 
-            this.activeSession.CurrentHits++;
-            this.activeSession.SlapAnimationTicksRemaining = this.renderer.DiveHitTickDuration;
-            this.renderer.PlayDiveSlap(this.activeSession, this.activeSession.TargetBobberPosition + new Vector2(0f, -8f));
+            this.ActiveSession.CurrentHits++;
+            this.ActiveSession.SlapAnimationTicksRemaining = this.renderer.DiveHitTickDuration;
+            this.renderer.PlayDiveSlap(this.ActiveSession, this.ActiveSession.TargetBobberPosition + new Vector2(0f, -8f));
+            this.BroadcastVisualEffect(
+                this.ActiveSession,
+                MultiplayerVisualEffectKind.DiveSlapImpact,
+                this.ActiveSession.TargetBobberPosition + new Vector2(0f, -8f)
+            );
 
-            if (this.activeSession.CurrentHits >= this.activeSession.RequiredHits)
-                this.BeginResolveSuccess(this.activeSession);
+            if (this.ActiveSession.CurrentHits >= this.ActiveSession.RequiredHits)
+                this.BeginResolveSuccess(this.ActiveSession);
 
+            this.BroadcastDiveSnapshot(this.ActiveSession);
             return true;
         }
 
         private void BeginResolveSuccess(DiveSlapSession session)
         {
             ResetDiveSlapFishState(session);
-            StopFishingRodLoopingAudio(session.Rod);
+            StopFishingRodLoopingAudio();
             if (ReferenceEquals(Game1.activeClickableMenu, session.BobberBar))
                 Game1.activeClickableMenu = null;
 
@@ -442,7 +604,7 @@ namespace FishSlapper.Gameplay
 
         private void BeginResolveFail(DiveSlapSession session)
         {
-            StopFishingRodLoopingAudio(session.Rod);
+            StopFishingRodLoopingAudio();
             session.FailRetaliationImpactTriggered = false;
             this.BeginPhase(
                 session,
@@ -493,7 +655,7 @@ namespace FishSlapper.Gameplay
         private void TriggerFailRetaliationImpact(DiveSlapSession session)
         {
             session.FailRetaliationImpactTriggered = true;
-            string playerName = string.IsNullOrWhiteSpace(Game1.player.Name) ? "Player" : Game1.player.Name;
+            string playerName = GetPlayerDisplayName(session.Owner);
             string retaliationText = this.helper.Translation
                 .Get(
                     "hud.dive-slap-retaliation",
@@ -505,7 +667,12 @@ namespace FishSlapper.Gameplay
                 )
                 .ToString();
             this.renderer.PlayDiveRetaliationImpact(session.FailRetaliationImpactPosition);
-            Game1.addHUDMessage(HUDMessage.ForCornerTextbox(retaliationText));
+            this.BroadcastVisualEffect(
+                session,
+                MultiplayerVisualEffectKind.RetaliationImpact,
+                session.FailRetaliationImpactPosition
+            );
+            this.ShowGlobalCornerTextbox(retaliationText);
         }
 
         private void ShowDiveSuccessMessage(DiveSlapSession session)
@@ -513,7 +680,7 @@ namespace FishSlapper.Gameplay
             int elapsedTicks = Math.Max(1, session.TotalSlapTicks - session.RemainingSlapTicks);
             float elapsedSeconds = Math.Max(0.1f, elapsedTicks / 60f);
             string timeText = elapsedSeconds.ToString("0.0", CultureInfo.InvariantCulture);
-            string playerName = string.IsNullOrWhiteSpace(Game1.player.Name) ? "Player" : Game1.player.Name;
+            string playerName = GetPlayerDisplayName(session.Owner);
             string successText = this.helper.Translation
                 .Get(
                     "hud.dive-slap-success",
@@ -526,75 +693,82 @@ namespace FishSlapper.Gameplay
                     }
                 )
                 .ToString();
-            Game1.addHUDMessage(HUDMessage.ForCornerTextbox(successText));
+            this.ShowGlobalCornerTextbox(successText);
         }
 
-        private void RecordCaughtFishSlap(FishingRod rod)
+        private void RecordCaughtFishSlap(ScreenState screenState, Farmer player, FishingRod rod)
         {
-            if (this.activeCaughtFishSlapSummary is not null && !ReferenceEquals(this.activeCaughtFishSlapSummary.Rod, rod))
-                this.CompleteCaughtFishSlapSummary(showMessage: true);
+            if (screenState.ActiveCaughtFishSlapSummary is not null
+                && !ReferenceEquals(screenState.ActiveCaughtFishSlapSummary.Rod, rod))
+            {
+                this.CompleteCaughtFishSlapSummary(screenState, showMessage: true, (uint)Game1.ticks);
+            }
 
             string fishDisplayName = ResolveCaughtFishDisplayName(rod);
-            if (this.activeCaughtFishSlapSummary is null)
+            if (screenState.ActiveCaughtFishSlapSummary is null)
             {
-                this.activeCaughtFishSlapSummary = new CaughtFishSlapSummary
+                screenState.ActiveCaughtFishSlapSummary = new CaughtFishSlapSummary
                 {
                     Rod = rod,
                     FishDisplayName = fishDisplayName,
-                    FirstSlapTick = this.worldTickCounter,
+                    PlayerName = GetPlayerDisplayName(player),
+                    FirstSlapTick = (uint)Game1.ticks,
                     SlapCount = 1
                 };
                 return;
             }
 
-            this.activeCaughtFishSlapSummary.FishDisplayName = fishDisplayName;
-            this.activeCaughtFishSlapSummary.SlapCount++;
+            screenState.ActiveCaughtFishSlapSummary.FishDisplayName = fishDisplayName;
+            screenState.ActiveCaughtFishSlapSummary.PlayerName = GetPlayerDisplayName(player);
+            screenState.ActiveCaughtFishSlapSummary.SlapCount++;
         }
 
-        private void UpdateCaughtFishSlapSummary()
+        private void UpdateCaughtFishSlapSummary(ScreenState screenState, uint ticks)
         {
-            if (this.activeCaughtFishSlapSummary is null)
+            if (screenState.ActiveCaughtFishSlapSummary is null)
                 return;
 
-            if (ReferenceEquals(Game1.player.CurrentTool, this.activeCaughtFishSlapSummary.Rod) && this.activeCaughtFishSlapSummary.Rod.fishCaught)
+            if (ReferenceEquals(Game1.player?.CurrentTool, screenState.ActiveCaughtFishSlapSummary.Rod)
+                && screenState.ActiveCaughtFishSlapSummary.Rod.fishCaught)
+            {
                 return;
+            }
 
-            this.CompleteCaughtFishSlapSummary(showMessage: true);
+            this.CompleteCaughtFishSlapSummary(screenState, showMessage: true, ticks);
         }
 
-        private void CompleteCaughtFishSlapSummary(bool showMessage)
+        private void CompleteCaughtFishSlapSummary(ScreenState screenState, bool showMessage, uint ticks)
         {
-            if (this.activeCaughtFishSlapSummary is null)
+            if (screenState.ActiveCaughtFishSlapSummary is null)
                 return;
 
-            CaughtFishSlapSummary summary = this.activeCaughtFishSlapSummary;
-            this.activeCaughtFishSlapSummary = null;
+            CaughtFishSlapSummary summary = screenState.ActiveCaughtFishSlapSummary;
+            screenState.ActiveCaughtFishSlapSummary = null;
             if (showMessage)
-                this.ShowCaughtFishSlapMessage(summary);
+                this.ShowCaughtFishSlapMessage(summary, ticks);
         }
 
-        private void ShowCaughtFishSlapMessage(CaughtFishSlapSummary summary)
+        private void ShowCaughtFishSlapMessage(CaughtFishSlapSummary summary, uint currentTick)
         {
             if (summary.SlapCount <= 0)
                 return;
 
-            int elapsedTicks = Math.Max(1, this.worldTickCounter - summary.FirstSlapTick);
+            int elapsedTicks = Math.Max(1, (int)(currentTick - summary.FirstSlapTick));
             float elapsedSeconds = Math.Max(0.1f, elapsedTicks / 60f);
             string timeText = elapsedSeconds.ToString("0.0", CultureInfo.InvariantCulture);
-            string playerName = string.IsNullOrWhiteSpace(Game1.player.Name) ? "Player" : Game1.player.Name;
             string successText = this.helper.Translation
                 .Get(
                     "hud.caught-slap-success",
                     new
                     {
-                        player = playerName,
+                        player = summary.PlayerName,
                         time = timeText,
                         fish = summary.FishDisplayName,
                         slap_num = summary.SlapCount
                     }
                 )
                 .ToString();
-            Game1.addHUDMessage(HUDMessage.ForCornerTextbox(successText));
+            this.ShowGlobalCornerTextbox(successText);
         }
 
         private static string ResolveCaughtFishDisplayName(FishingRod rod)
@@ -604,6 +778,27 @@ namespace FishSlapper.Gameplay
 
             var fishData = rod.whichFish.GetParsedOrErrorData();
             return fishData.DisplayName ?? rod.whichFish.QualifiedItemId ?? "???";
+        }
+
+        private static CaughtFishSlapVisualData CreateCaughtFishVisualData(Farmer player, FishingRod rod)
+        {
+            return new CaughtFishSlapVisualData
+            {
+                OwnerPlayerId = player.UniqueMultiplayerID,
+                LocationName = player.currentLocation?.NameOrUniqueName ?? string.Empty,
+                FacingDirection = player.FacingDirection,
+                FishQualifiedItemId = rod.whichFish?.QualifiedItemId ?? string.Empty,
+                FishDisplayName = ResolveCaughtFishDisplayName(rod),
+                NumberOfFishCaught = Math.Max(1, rod.numberOfFishCaught),
+                FishSize = rod.fishSize,
+                BossFish = rod.bossFish,
+                RecordSize = rod.recordSize
+            };
+        }
+
+        private static string GetPlayerDisplayName(Farmer player)
+        {
+            return string.IsNullOrWhiteSpace(player.Name) ? "Player" : player.Name;
         }
 
         private static void ResetDiveSlapFishState(DiveSlapSession session)
@@ -621,60 +816,197 @@ namespace FishSlapper.Gameplay
         {
             // 玩家逻辑上仍留在岸边，只是在渲染层替换成跳水分身。
             // 因此这里要锁输入，避免和原版钓鱼/移动状态互相打架。
-            Game1.player.Halt();
-            Game1.player.canMove = false;
-            Game1.player.freezePause = Math.Max(1, Game1.player.freezePause);
-            Game1.player.faceDirection(session.CastFacingDirection);
+            Farmer player = session.Owner;
+            player.Halt();
+            player.canMove = false;
+            player.freezePause = Math.Max(1, player.freezePause);
+            player.faceDirection(session.CastFacingDirection);
         }
 
         private void RestorePlayerFromDive(DiveSlapSession session)
         {
-            Game1.player.Position = session.OriginalPlayerPosition;
-            Game1.player.FacingDirection = session.PreviousFacingDirection;
-            Game1.player.Halt();
+            Farmer player = session.Owner;
+            player.Position = session.OriginalPlayerPosition;
+            player.FacingDirection = session.PreviousFacingDirection;
+            player.Halt();
 
             if (session.OutcomeApplied)
             {
                 // 成功/失败分支都已经走完原版收尾逻辑，这里必须强制解锁玩家。
                 // 如果把进入 BobberBar 之前的锁定状态原样恢复，会再次把人卡死。
-                Game1.player.forceCanMove();
-                Game1.player.freezePause = 0;
-                Game1.player.canMove = true;
+                player.forceCanMove();
+                player.freezePause = 0;
+                player.canMove = true;
             }
             else
             {
-                Game1.player.canMove = session.PreviousCanMove;
-                Game1.player.freezePause = session.PreviousFreezePause;
+                player.canMove = session.PreviousCanMove;
+                player.freezePause = session.PreviousFreezePause;
             }
 
-            this.renderer.ResetLocalPlayerPose(session.PreviousFacingDirection);
+            if (session.OwnerPlayerId == (Game1.player?.UniqueMultiplayerID ?? -1))
+                this.renderer.ResetLocalPlayerPose(session.PreviousFacingDirection);
         }
 
-        private void EndSession()
+        private void EndSession(ScreenState screenState)
         {
-            if (this.activeSession is null)
+            if (screenState.ActiveSession is null)
                 return;
 
-            DiveSlapSession completedSession = this.activeSession;
-            StopFishingRodLoopingAudio(completedSession.Rod);
-            ResetFishingRodPostDiveVisualState(completedSession.Rod);
+            DiveSlapSession completedSession = screenState.ActiveSession;
+            StopFishingRodLoopingAudio();
+            ResetFishingRodPostDiveVisualState(completedSession.Owner, completedSession.Rod);
             this.RestorePlayerFromDive(completedSession);
-            this.activeSession = null;
-            this.ApplyDiveCostOnReturn();
+            screenState.ActiveSession = null;
+            this.ApplyDiveCostOnReturn(completedSession.Owner);
+            this.BroadcastDiveStop(completedSession.OwnerPlayerId);
         }
 
-        private void CancelSession()
+        private void CancelSession(ScreenState screenState)
         {
-            if (this.activeSession is null)
+            if (screenState.ActiveSession is null)
                 return;
 
-            StopFishingRodLoopingAudio(this.activeSession.Rod);
-            ResetFishingRodPostDiveVisualState(this.activeSession.Rod);
-            this.RestorePlayerFromDive(this.activeSession);
-            this.activeSession = null;
+            StopFishingRodLoopingAudio();
+            ResetFishingRodPostDiveVisualState(screenState.ActiveSession.Owner, screenState.ActiveSession.Rod);
+            this.RestorePlayerFromDive(screenState.ActiveSession);
+            long ownerPlayerId = screenState.ActiveSession.OwnerPlayerId;
+            screenState.ActiveSession = null;
+            this.BroadcastDiveStop(ownerPlayerId);
         }
 
-        private static void StopFishingRodLoopingAudio(FishingRod rod)
+        private void BroadcastDiveSnapshot(DiveSlapSession session)
+        {
+            if (!Context.IsMultiplayer)
+                return;
+
+            this.helper.Multiplayer.SendMessage(
+                DiveSlapVisualSnapshot.FromState(session),
+                MultiplayerMessageTypes.DiveSlapSync,
+                new[] { this.modUniqueId }
+            );
+        }
+
+        private void BroadcastDiveStop(long ownerPlayerId)
+        {
+            if (!Context.IsMultiplayer)
+                return;
+
+            this.helper.Multiplayer.SendMessage(
+                new DiveSlapStopMessage { OwnerPlayerId = ownerPlayerId },
+                MultiplayerMessageTypes.DiveSlapStop,
+                new[] { this.modUniqueId }
+            );
+        }
+
+        private void BroadcastCaughtFishSlap(CaughtFishSlapVisualData visualData)
+        {
+            if (!Context.IsMultiplayer)
+                return;
+
+            this.helper.Multiplayer.SendMessage(
+                visualData,
+                MultiplayerMessageTypes.CaughtFishSlap,
+                new[] { this.modUniqueId }
+            );
+        }
+
+        private void BroadcastVisualEffect(DiveSlapSession session, MultiplayerVisualEffectKind effectKind, Vector2 worldPosition)
+        {
+            this.BroadcastVisualEffect(session.OwnerPlayerId, session.LocationName, effectKind, worldPosition);
+        }
+
+        private void BroadcastVisualEffect(long ownerPlayerId, string locationName, MultiplayerVisualEffectKind effectKind, Vector2 worldPosition)
+        {
+            if (!Context.IsMultiplayer)
+                return;
+
+            this.helper.Multiplayer.SendMessage(
+                new MultiplayerVisualEffectData
+                {
+                    OwnerPlayerId = ownerPlayerId,
+                    LocationName = locationName,
+                    EffectKind = effectKind,
+                    WorldPosition = worldPosition
+                },
+                MultiplayerMessageTypes.VisualEffect,
+                new[] { this.modUniqueId }
+            );
+        }
+
+        private void ShowGlobalCornerTextbox(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return;
+
+            Game1.addHUDMessage(HUDMessage.ForCornerTextbox(text));
+            if (!Context.IsMultiplayer)
+                return;
+
+            this.helper.Multiplayer.SendMessage(
+                new GlobalHudMessageData { Text = text },
+                MultiplayerMessageTypes.GlobalHudMessage,
+                new[] { this.modUniqueId }
+            );
+        }
+
+        private void TryPlayObservedDiveFishSplash(DiveSlapVisualSnapshot snapshot)
+        {
+            string currentLocationName = Game1.currentLocation?.NameOrUniqueName ?? string.Empty;
+            if (!IsSameLocation(currentLocationName, snapshot.LocationName)
+                || !this.observedDiveStates.TryGetValue(snapshot.OwnerPlayerId, out DiveSlapVisualSnapshot? previousSnapshot)
+                || !IsSameLocation(previousSnapshot.LocationName, snapshot.LocationName)
+                || previousSnapshot.SlapFishOffsetY >= 0f
+                || snapshot.SlapFishOffsetY < 0f)
+            {
+                return;
+            }
+
+            this.renderer.PlayObservedVisualEffect(
+                new MultiplayerVisualEffectData
+                {
+                    OwnerPlayerId = snapshot.OwnerPlayerId,
+                    LocationName = snapshot.LocationName,
+                    EffectKind = MultiplayerVisualEffectKind.WaterSurfaceSplash,
+                    WorldPosition = snapshot.SlapFishSurfacePosition
+                }
+            );
+        }
+
+        private bool TryGetDiveRenderState(Farmer farmer, out IDiveSlapRenderState? state)
+        {
+            long playerId = farmer.UniqueMultiplayerID;
+            string farmerLocationName = farmer.currentLocation?.NameOrUniqueName ?? string.Empty;
+
+            foreach (var pair in this.screenStates.GetActiveValues())
+            {
+                ScreenState screenState = pair.Value;
+                if (screenState.ActiveSession is not null
+                    && screenState.ActiveSession.OwnerPlayerId == playerId
+                    && IsSameLocation(farmerLocationName, screenState.ActiveSession.LocationName))
+                {
+                    state = screenState.ActiveSession;
+                    return true;
+                }
+            }
+
+            if (this.observedDiveStates.TryGetValue(playerId, out DiveSlapVisualSnapshot? snapshot)
+                && IsSameLocation(farmerLocationName, snapshot.LocationName))
+            {
+                state = snapshot;
+                return true;
+            }
+
+            state = null;
+            return false;
+        }
+
+        private static bool IsSameLocation(string left, string right)
+        {
+            return string.Equals(left, right, StringComparison.Ordinal);
+        }
+
+        private static void StopFishingRodLoopingAudio()
         {
             StopFishingRodCue(FishingRodChargeSoundField);
             StopFishingRodCue(FishingRodReelSoundField);
@@ -682,12 +1014,39 @@ namespace FishSlapper.Gameplay
             StopFishingRodCue(BobberBarUnReelSoundField);
         }
 
-        private static void ResetFishingRodPostDiveVisualState(FishingRod rod)
+        private void LogMissingReflectionBindings()
+        {
+            List<string> missingBindings = new();
+            AddMissingBindingName(missingBindings, FishingRodChargeSoundField, "FishingRod.chargeSound");
+            AddMissingBindingName(missingBindings, FishingRodReelSoundField, "FishingRod.reelSound");
+            AddMissingBindingName(missingBindings, FishingRodHadBobberField, "FishingRod.hadBobber");
+            AddMissingBindingName(missingBindings, FishingRodPlayerAdjustedBobberField, "FishingRod._hasPlayerAdjustedBobber");
+            AddMissingBindingName(missingBindings, FishingRodBobberBobField, "FishingRod.bobberBob");
+            AddMissingBindingName(missingBindings, FishingRodBobberTimeAccumulatorField, "FishingRod.bobberTimeAccumulator");
+            AddMissingBindingName(missingBindings, FishingRodTimePerBobberBobField, "FishingRod.timePerBobberBob");
+            AddMissingBindingName(missingBindings, BobberBarReelSoundField, "BobberBar.reelSound");
+            AddMissingBindingName(missingBindings, BobberBarUnReelSoundField, "BobberBar.unReelSound");
+
+            if (missingBindings.Count == 0)
+                return;
+
+            this.monitor.Log(
+                $"Missing internal field bindings: {string.Join(", ", missingBindings)}. Dive audio cleanup or bobber visual reset may be degraded on this game version.",
+                LogLevel.Warn);
+        }
+
+        private static void AddMissingBindingName(List<string> missingBindings, FieldInfo? field, string bindingName)
+        {
+            if (field is null)
+                missingBindings.Add(bindingName);
+        }
+
+        private static void ResetFishingRodPostDiveVisualState(Farmer player, FishingRod rod)
         {
             rod.bobber.Set(Vector2.Zero);
             rod.castedButBobberStillInAir = false;
             rod.pullingOutOfWater = false;
-            Game1.player.armOffset = Vector2.Zero;
+            player.armOffset = Vector2.Zero;
 
             SetFishingRodFieldValue(FishingRodHadBobberField, rod, false);
             SetFishingRodFieldValue(FishingRodPlayerAdjustedBobberField, rod, false);
@@ -712,11 +1071,11 @@ namespace FishSlapper.Gameplay
             field?.SetValue(rod, value);
         }
 
-        private void ApplyDiveCostOnReturn()
+        private void ApplyDiveCostOnReturn(Farmer player)
         {
-            Farmer player = Game1.player;
             float oldStamina = player.Stamina;
 
+            // 低血量会直接猝死是玩法设计，不在这里做保底夹取。
             if (player.health <= DiveSlapHealthCost)
             {
                 player.takeDamage(player.health, true, null!);
@@ -732,6 +1091,13 @@ namespace FishSlapper.Gameplay
 
             player.health -= DiveSlapHealthCost;
             player.Stamina = oldStamina - DiveSlapStaminaCost;
+        }
+
+        private void ClearTransientState()
+        {
+            this.observedDiveStates.Clear();
+            this.renderer.ClearTransientState();
+            this.screenStates.ResetAllScreens();
         }
     }
 }

@@ -1,11 +1,15 @@
 using Microsoft.Xna.Framework;
+using StardewValley;
 using StardewValley.Menus;
 using StardewValley.Tools;
 
 namespace FishSlapper.Gameplay
 {
-    internal sealed class DiveSlapSession
+    internal sealed class DiveSlapSession : IDiveSlapRenderState
     {
+        public Farmer Owner { get; set; } = null!;
+        public long OwnerPlayerId { get; set; }
+        public string LocationName { get; set; } = string.Empty;
         public FishingRod Rod { get; set; } = null!;
         public BobberBar BobberBar { get; set; } = null!;
         public Vector2 OriginalPlayerPosition { get; set; }

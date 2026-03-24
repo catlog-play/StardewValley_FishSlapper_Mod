@@ -16,19 +16,39 @@ namespace FishSlapper.Patches
 
         public static void Apply(Harmony harmony)
         {
-            var original = AccessTools.Method(typeof(Farmer), "draw", new[] { typeof(SpriteBatch) });
-            if (original is null)
-                return;
+            var farmerDraw = AccessTools.Method(typeof(Farmer), "draw", new[] { typeof(SpriteBatch) });
+            if (farmerDraw is not null)
+                harmony.Patch(farmerDraw, prefix: new HarmonyMethod(typeof(FarmerDrawPatch), nameof(PrefixFarmerDraw)));
 
-            harmony.Patch(original, prefix: new HarmonyMethod(typeof(FarmerDrawPatch), nameof(PrefixDraw)));
+            Type[][] inheritedSignatures =
+            {
+                new[] { typeof(SpriteBatch), typeof(float) },
+                new[] { typeof(SpriteBatch), typeof(int), typeof(float) }
+            };
+
+            var inheritedPrefix = new HarmonyMethod(typeof(FarmerDrawPatch), nameof(PrefixCharacterDraw));
+            foreach (Type[] signature in inheritedSignatures)
+            {
+                var original = AccessTools.DeclaredMethod(typeof(Character), "draw", signature);
+                if (original is not null)
+                    harmony.Patch(original, prefix: inheritedPrefix);
+            }
         }
 
-        private static bool PrefixDraw(Farmer __instance, SpriteBatch b)
+        private static bool PrefixFarmerDraw(Farmer __instance, SpriteBatch __0)
         {
             if (FarmerDrawPatch.controller is null)
                 return true;
 
-            return !FarmerDrawPatch.controller.TryDrawLocalPlayerReplacement(__instance, b);
+            return !FarmerDrawPatch.controller.TryDrawFarmerReplacement(__instance, __0);
+        }
+
+        private static bool PrefixCharacterDraw(Character __instance, SpriteBatch __0)
+        {
+            if (FarmerDrawPatch.controller is null || __instance is not Farmer farmer)
+                return true;
+
+            return !FarmerDrawPatch.controller.TryDrawFarmerReplacement(farmer, __0);
         }
     }
 }

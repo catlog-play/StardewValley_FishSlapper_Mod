@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
 using Microsoft.Xna.Framework;
+using Microsoft.Xna.Framework.Content;
 using Microsoft.Xna.Framework.Graphics;
 using StardewModdingAPI.Events;
+using StardewModdingAPI.Utilities;
 using StardewValley;
 using StardewValley.Menus;
 using FishSlapper.Gameplay;
@@ -84,26 +86,20 @@ namespace FishSlapper.Rendering
 
         private readonly List<BurstParticle> burstParticles = new();
         private readonly Random rng = new();
+        private readonly Dictionary<long, Farmer> renderFarmers = new();
+        private readonly HashSet<Farmer> replacementRenderFarmers = new();
+        private readonly HashSet<long> drawnCaughtFishInfoPlayers = new();
+        private readonly Dictionary<long, CaughtFishRenderState> caughtFishRenderStates = new();
+        private readonly PerScreen<LocalScreenState> localScreenState = new(() => new LocalScreenState());
         private Texture2D? pixelTexture;
         private Texture2D? mobileAtlasTexture;
         private Texture2D? swimShadowTexture;
         private bool attemptedMobileAtlasLoad;
-        private int caughtFishSlapTick = -1;
         private int swimShadowFrame;
         private int swimShadowTimer = SwimShadowFrameDurationMs;
-        private float fishTwitchOffsetX;
-        private float fishTwitchOffsetY;
-        private float fishTwitchRotation;
-        private float fishTwitchRotationVelocity;
-        private float fishTwitchVelocityX;
-        private float fishTwitchVelocityY;
-        private int fishTwitchBouncesRemaining;
-        private int caughtFishStandFrameTicksRemaining;
-        private int localPoseResetTicks;
-        private int localPoseResetFacingDirection = 2;
-        private bool hideCaughtFishPreview;
-        private Farmer? diveRenderFarmer;
         private Farmer? toolSuppressedFarmer;
+        private uint lastGlobalUpdateTick;
+        private uint lastSwimShadowUpdateTick;
 
         private sealed class BurstParticle
         {
@@ -119,6 +115,26 @@ namespace FishSlapper.Rendering
             public float Gravity;
         }
 
+        private sealed class LocalScreenState
+        {
+            public int LocalPoseResetTicks { get; set; }
+            public int LocalPoseResetFacingDirection { get; set; } = 2;
+        }
+
+        private sealed class CaughtFishRenderState
+        {
+            public CaughtFishSlapVisualData VisualData { get; set; } = new();
+            public int AnimationTick { get; set; } = -1;
+            public int StandFrameTicksRemaining { get; set; }
+            public float FishTwitchOffsetX { get; set; }
+            public float FishTwitchOffsetY { get; set; }
+            public float FishTwitchRotation { get; set; }
+            public float FishTwitchRotationVelocity { get; set; }
+            public float FishTwitchVelocityX { get; set; }
+            public float FishTwitchVelocityY { get; set; }
+            public int FishTwitchBouncesRemaining { get; set; }
+        }
+
         internal readonly record struct MobileActionButtonsLayout(
             bool HasDiveButton,
             Rectangle DiveButtonBounds,
@@ -129,37 +145,58 @@ namespace FishSlapper.Rendering
             public bool HasAnyButton => this.HasDiveButton || this.HasSlapButton;
         }
 
-        public bool ShouldHideCaughtFishToolPreview => this.hideCaughtFishPreview;
-
         public bool ShouldSuppressToolDraw(Farmer farmer)
         {
             return ReferenceEquals(farmer, this.toolSuppressedFarmer)
-                || (ReferenceEquals(farmer, Game1.player) && this.localPoseResetTicks > 0 && this.caughtFishSlapTick < 0 && !Game1.player.UsingTool);
+                || (ReferenceEquals(farmer, Game1.player)
+                    && this.localScreenState.Value.LocalPoseResetTicks > 0
+                    && !Game1.player.UsingTool);
+        }
+
+        public bool IsReplacementRenderFarmer(Farmer farmer)
+        {
+            return this.replacementRenderFarmers.Contains(farmer);
+        }
+
+        public bool HasCaughtFishSlapReplacement(Farmer farmer)
+        {
+            return this.caughtFishRenderStates.TryGetValue(farmer.UniqueMultiplayerID, out CaughtFishRenderState? state)
+                && state.AnimationTick >= 0
+                && string.Equals(state.VisualData.LocationName, farmer.currentLocation?.NameOrUniqueName, StringComparison.Ordinal);
         }
 
         public void ResetLocalPlayerPose(int facingDirection)
         {
-            this.localPoseResetFacingDirection = facingDirection;
-            this.localPoseResetTicks = 4;
+            this.localScreenState.Value.LocalPoseResetFacingDirection = facingDirection;
+            this.localScreenState.Value.LocalPoseResetTicks = 4;
             Game1.player.faceDirection(facingDirection);
             this.ApplyPose(Game1.player, GetStandingFrame(facingDirection));
         }
 
         public int DiveHitTickDuration => DiveHitAnimationDurationTicks;
 
-        public void PlayCaughtFishSlap()
+        public void PlayCaughtFishSlap(CaughtFishSlapVisualData visualData, bool playLocalEffects)
         {
+            if (this.caughtFishRenderStates.TryGetValue(visualData.OwnerPlayerId, out CaughtFishRenderState? state))
+                state.StandFrameTicksRemaining = state.AnimationTick >= 0 ? CaughtFishStandResetTicks : 0;
+            else
+                this.caughtFishRenderStates[visualData.OwnerPlayerId] = state = new CaughtFishRenderState();
+
+            state.VisualData = visualData;
+            state.AnimationTick = 8;
+            state.FishTwitchOffsetX = 0f;
+            state.FishTwitchOffsetY = 0f;
+            state.FishTwitchRotation = 0f;
+            state.FishTwitchVelocityX = (float)(this.rng.NextDouble() * (CaughtFishMaxHorizontalTwitchVelocity * 2f) - CaughtFishMaxHorizontalTwitchVelocity);
+            state.FishTwitchVelocityY = CaughtFishInitialJumpVelocity;
+            state.FishTwitchRotationVelocity = state.FishTwitchVelocityX * 0.065f;
+            state.FishTwitchBouncesRemaining = 1;
+
+            if (!playLocalEffects)
+                return;
+
             Game1.playSound(ModConstants.SlapSoundId);
             Game1.player.jump(4f);
-            this.caughtFishStandFrameTicksRemaining = this.caughtFishSlapTick >= 0 ? CaughtFishStandResetTicks : 0;
-            this.caughtFishSlapTick = 8;
-            this.fishTwitchOffsetX = 0f;
-            this.fishTwitchOffsetY = 0f;
-            this.fishTwitchRotation = 0f;
-            this.fishTwitchVelocityX = (float)(this.rng.NextDouble() * (CaughtFishMaxHorizontalTwitchVelocity * 2f) - CaughtFishMaxHorizontalTwitchVelocity);
-            this.fishTwitchVelocityY = CaughtFishInitialJumpVelocity;
-            this.fishTwitchRotationVelocity = this.fishTwitchVelocityX * 0.065f;
-            this.fishTwitchBouncesRemaining = 1;
             this.SpawnBurstParticles(Game1.player.Position + new Vector2(-16f, -64f));
         }
 
@@ -204,66 +241,54 @@ namespace FishSlapper.Rendering
             this.PlayFishWaterSplash(splashWorldPos);
         }
 
-        public void OnUpdateTicked(DiveSlapSession? session)
+        public void PlayObservedVisualEffect(MultiplayerVisualEffectData effectData)
         {
-            this.UpdateSwimShadowAnimation(session);
-
-            if (this.caughtFishSlapTick >= 0)
+            switch (effectData.EffectKind)
             {
-                this.caughtFishSlapTick++;
-                if (this.caughtFishSlapTick > CaughtFishSlapDurationTicks)
-                    this.caughtFishSlapTick = -1;
+                case MultiplayerVisualEffectKind.Burst:
+                    this.SpawnBurstParticles(effectData.WorldPosition);
+                    break;
+
+                case MultiplayerVisualEffectKind.DiveSlapImpact:
+                    this.SpawnBurstParticles(effectData.WorldPosition);
+                    this.SpawnSlapWaterDroplets(effectData.WorldPosition);
+                    break;
+
+                case MultiplayerVisualEffectKind.PlayerDiveSplash:
+                    this.SpawnPlayerDiveSplash(effectData.WorldPosition);
+                    break;
+
+                case MultiplayerVisualEffectKind.PlayerExitSplash:
+                    this.SpawnPlayerExitSplash(effectData.WorldPosition);
+                    break;
+
+                case MultiplayerVisualEffectKind.WaterSurfaceSplash:
+                    this.SpawnSplashParticles(effectData.WorldPosition);
+                    break;
+
+                case MultiplayerVisualEffectKind.RetaliationImpact:
+                    this.SpawnRetaliationImpactParticles(effectData.WorldPosition);
+                    break;
+            }
+        }
+
+        public void OnUpdateTicked(DiveSlapSession? session, uint ticks)
+        {
+            this.UpdateSwimShadowAnimation(session, ticks);
+
+            if (this.lastGlobalUpdateTick != ticks)
+            {
+                this.lastGlobalUpdateTick = ticks;
+                this.UpdateCaughtFishRenderStates();
+                this.UpdateBurstParticles();
             }
 
-            if (
-                this.fishTwitchVelocityX != 0f
-                || this.fishTwitchVelocityY != 0f
-                || this.fishTwitchOffsetX != 0f
-                || this.fishTwitchOffsetY < 0f
-                || this.fishTwitchRotation != 0f
-                || this.fishTwitchRotationVelocity != 0f
-            )
-            {
-                this.fishTwitchOffsetX += this.fishTwitchVelocityX;
-                this.fishTwitchOffsetY += this.fishTwitchVelocityY;
-                this.fishTwitchRotation += this.fishTwitchRotationVelocity;
-                this.fishTwitchVelocityX *= 0.72f;
-                this.fishTwitchVelocityY += 1.1f;
-                this.fishTwitchRotationVelocity *= 0.78f;
-                if (this.fishTwitchOffsetY >= 0f)
-                {
-                    this.fishTwitchOffsetY = 0f;
-                    if (this.fishTwitchBouncesRemaining > 0)
-                    {
-                        this.fishTwitchVelocityY = CaughtFishBounceJumpVelocity;
-                        this.fishTwitchRotationVelocity = -this.fishTwitchRotationVelocity * 0.6f;
-                        this.fishTwitchBouncesRemaining--;
-                    }
-                    else
-                    {
-                        this.fishTwitchVelocityY = 0f;
-                    }
-                }
-
-                if (MathF.Abs(this.fishTwitchOffsetX) < 0.05f && MathF.Abs(this.fishTwitchVelocityX) < 0.05f)
-                {
-                    this.fishTwitchOffsetX = 0f;
-                    this.fishTwitchVelocityX = 0f;
-                }
-
-                if (MathF.Abs(this.fishTwitchRotation) < 0.005f && MathF.Abs(this.fishTwitchRotationVelocity) < 0.005f)
-                {
-                    this.fishTwitchRotation = 0f;
-                    this.fishTwitchRotationVelocity = 0f;
-                }
-            }
-
-            if (this.localPoseResetTicks > 0)
+            if (this.localScreenState.Value.LocalPoseResetTicks > 0)
             {
                 if (Game1.player.UsingTool)
-                    this.localPoseResetTicks = 0;
+                    this.localScreenState.Value.LocalPoseResetTicks = 0;
                 else
-                    this.localPoseResetTicks--;
+                    this.localScreenState.Value.LocalPoseResetTicks--;
             }
 
             if (session is not null && session.SlapAnimationTicksRemaining > 0)
@@ -271,83 +296,31 @@ namespace FishSlapper.Rendering
 
             if (session is not null)
                 this.UpdateDiveSlapFish(session);
-
-            foreach (var particle in this.burstParticles)
-            {
-                particle.WorldPos += particle.Velocity;
-                particle.Velocity *= 0.91f;
-                particle.Velocity.Y += particle.Gravity;
-                particle.Alpha -= particle.AlphaDecay;
-                particle.Rotation += particle.RotationSpeed;
-            }
-
-            this.burstParticles.RemoveAll(p => p.Alpha <= 0f);
         }
 
         public void OnRenderingWorld(DiveSlapSession? session)
         {
-            if (this.caughtFishSlapTick >= 0)
-            {
-                this.hideCaughtFishPreview = true;
-                if (this.caughtFishStandFrameTicksRemaining > 0)
-                {
-                    this.caughtFishStandFrameTicksRemaining--;
-                    Game1.player.FarmerSprite.setCurrentFrame(GetStandingFrame(Game1.player.FacingDirection));
-                    return;
-                }
+            this.drawnCaughtFishInfoPlayers.Clear();
 
-                // 这里故意不清原版“手里举鱼”的状态，只临时覆写一帧出拳姿势。
-                // 如果把动画栈整个清掉，会把老玩法里“拿着鱼无限扇”的行为打断。
-                Game1.player.FarmerSprite.setCurrentFrame(CaughtFishPunchFrame);
-                return;
-            }
-
-            this.hideCaughtFishPreview = false;
-
-            if (this.localPoseResetTicks > 0)
+            if (this.localScreenState.Value.LocalPoseResetTicks > 0)
             {
                 if (Game1.player.UsingTool)
-                    this.localPoseResetTicks = 0;
+                    this.localScreenState.Value.LocalPoseResetTicks = 0;
                 else
-                    this.ApplyPose(Game1.player, GetStandingFrame(this.localPoseResetFacingDirection));
+                    this.ApplyPose(Game1.player, GetStandingFrame(this.localScreenState.Value.LocalPoseResetFacingDirection));
             }
         }
 
-        public bool TryDrawDiveSession(SpriteBatch spriteBatch, DiveSlapSession? session)
+        public void OnRenderedWorld(
+            RenderedWorldEventArgs e,
+            DiveSlapSession? session,
+            IEnumerable<DiveSlapVisualSnapshot> observedDiveStates,
+            string? slapPrompt
+        )
         {
-            if (session is null)
-            {
-                this.diveRenderFarmer = null;
-                return false;
-            }
-
-            this.DrawDiveSession(spriteBatch, session);
-            return true;
-        }
-
-        public bool TryDrawCaughtFishPreview(SpriteBatch spriteBatch, Farmer farmer, StardewValley.Tools.FishingRod rod)
-        {
-            if (this.caughtFishSlapTick < 0 || !rod.fishCaught || rod.whichFish is null || rod.whichFish.TypeIdentifier != "(O)")
-                return false;
-
-            Farmer drawFarmer = rod.lastUser ?? farmer;
-            this.DrawCaughtFishPreview(spriteBatch, drawFarmer, rod);
-            return true;
-        }
-
-        public void OnRenderedWorld(RenderedWorldEventArgs e, DiveSlapSession? session, string? slapPrompt)
-        {
-            if (session is null)
-                this.diveRenderFarmer = null;
-
-            if (session is not null && session.State == DiveSlapState.Slapping)
-                this.DrawDiveSlapFish(e.SpriteBatch, session);
-
-            if (session is not null && IsDiveSuccessHeldFishVisible(session))
-                this.DrawDiveSuccessHeldFish(e.SpriteBatch, session);
-
-            if (session is not null && session.State == DiveSlapState.ResolveFail)
-                this.DrawFailRetaliationFish(e.SpriteBatch, session);
+            this.DrawDiveOverlays(e.SpriteBatch, session);
+            foreach (DiveSlapVisualSnapshot snapshot in observedDiveStates)
+                this.DrawDiveOverlays(e.SpriteBatch, snapshot);
 
             if (this.pixelTexture is not null)
             {
@@ -384,14 +357,33 @@ namespace FishSlapper.Rendering
                 float cx = sp.X + 32f;
                 this.DrawPromptBox(e.SpriteBatch, cx, sp.Y + PromptBelowFeetOffset, slapPrompt);
             }
-
-            this.hideCaughtFishPreview = false;
         }
 
         public void OnRenderedActiveMenu(RenderedActiveMenuEventArgs e, DiveSlapSession? session, string? diveSlapPrompt)
         {
             if (diveSlapPrompt is not null)
                 this.DrawDiveSlapPrompt(e.SpriteBatch, diveSlapPrompt);
+        }
+
+        public void RemovePlayerVisuals(long playerId)
+        {
+            this.caughtFishRenderStates.Remove(playerId);
+            if (this.renderFarmers.Remove(playerId, out Farmer? renderFarmer))
+                this.replacementRenderFarmers.Remove(renderFarmer);
+        }
+
+        public void ClearTransientState()
+        {
+            this.caughtFishRenderStates.Clear();
+            this.renderFarmers.Clear();
+            this.replacementRenderFarmers.Clear();
+            this.drawnCaughtFishInfoPlayers.Clear();
+            this.burstParticles.Clear();
+            this.toolSuppressedFarmer = null;
+            this.lastGlobalUpdateTick = 0;
+            this.lastSwimShadowUpdateTick = 0;
+            this.ReleaseGraphicsResources();
+            this.localScreenState.ResetAllScreens();
         }
 
         public MobileActionButtonsLayout GetMobileActionButtonsLayout(
@@ -470,9 +462,9 @@ namespace FishSlapper.Rendering
                 this.DrawMobileActionButton(spriteBatch, layout.SlapButtonBounds, slapButtonLabel);
         }
 
-        private void DrawDiveSession(SpriteBatch spriteBatch, DiveSlapSession session)
+        public bool TryDrawDiveState(SpriteBatch spriteBatch, Farmer sourceFarmer, IDiveSlapRenderState state)
         {
-            Farmer renderFarmer = this.PrepareDiveRenderFarmer(session);
+            Farmer renderFarmer = this.PrepareDiveRenderFarmer(sourceFarmer, state);
             this.toolSuppressedFarmer = renderFarmer;
             try
             {
@@ -485,11 +477,41 @@ namespace FishSlapper.Rendering
             {
                 this.toolSuppressedFarmer = null;
             }
+
+            return true;
         }
 
-        private void DrawCaughtFishPreview(SpriteBatch spriteBatch, Farmer farmer, StardewValley.Tools.FishingRod rod)
+        public bool TryDrawCaughtFishSlapReplacement(SpriteBatch spriteBatch, Farmer farmer)
         {
-            if (rod.whichFish is null)
+            if (!this.caughtFishRenderStates.TryGetValue(farmer.UniqueMultiplayerID, out CaughtFishRenderState? state)
+                || state.AnimationTick < 0
+                || !string.Equals(state.VisualData.LocationName, farmer.currentLocation?.NameOrUniqueName, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            Farmer renderFarmer = this.PrepareCaughtFishRenderFarmer(farmer, state);
+            this.toolSuppressedFarmer = renderFarmer;
+            try
+            {
+                renderFarmer.draw(spriteBatch);
+                this.DrawCaughtFishHeldPreview(spriteBatch, farmer, state);
+                this.TryDrawCaughtFishInfoBoard(spriteBatch, farmer, state);
+            }
+            finally
+            {
+                this.toolSuppressedFarmer = null;
+            }
+
+            return true;
+        }
+
+        private void TryDrawCaughtFishInfoBoard(SpriteBatch spriteBatch, Farmer farmer, CaughtFishRenderState state)
+        {
+            if (!this.drawnCaughtFishInfoPlayers.Add(farmer.UniqueMultiplayerID))
+                return;
+
+            if (string.IsNullOrWhiteSpace(state.VisualData.FishQualifiedItemId))
                 return;
 
             float boardBobOffset = 4f * (float)Math.Round(
@@ -499,7 +521,9 @@ namespace FishSlapper.Rendering
             int standingPixelY = farmer.StandingPixel.Y;
             float boardLayerDepth = standingPixelY / 10000f + 0.06f;
             float iconLayerDepth = standingPixelY / 10000f + 0.0601f;
-            var fishData = rod.whichFish.GetParsedOrErrorData();
+            float textLayerDepth = standingPixelY / 10000f + 0.0602f;
+            float digitsLayerDepth = standingPixelY / 10000f + 0.0603f;
+            var fishData = ItemRegistry.GetMetadata(state.VisualData.FishQualifiedItemId).GetParsedOrErrorData();
             Texture2D fishTexture = fishData.GetTexture();
             Rectangle fishSourceRect = fishData.GetSourceRect(0, null);
 
@@ -527,44 +551,19 @@ namespace FishSlapper.Rendering
                 iconLayerDepth
             );
 
-            if (rod.numberOfFishCaught > 1)
+            if (state.VisualData.NumberOfFishCaught > 1)
             {
                 Utility.drawTinyDigits(
-                    rod.numberOfFishCaught,
+                    state.VisualData.NumberOfFishCaught,
                     spriteBatch,
                     Game1.GlobalToLocal(Game1.viewport, farmer.Position + new Vector2(-28f, -168f + boardBobOffset)),
                     3f,
-                    standingPixelY / 10000f + 0.061f,
+                    digitsLayerDepth,
                     Color.White
                 );
             }
 
-            this.DrawCaughtFishHeldSprite(
-                spriteBatch,
-                fishTexture,
-                fishSourceRect,
-                Game1.GlobalToLocal(
-                    Game1.viewport,
-                    farmer.Position + new Vector2(this.fishTwitchOffsetX, CaughtFishHeldBaseYOffset + this.fishTwitchOffsetY)
-                ),
-                GetHeldFishBaseRotation(rod) + this.fishTwitchRotation,
-                standingPixelY / 10000f + 0.062f
-            );
-
-            for (int i = 1; i < rod.numberOfFishCaught; i++)
-            {
-                float bonusRotation = i == 2 ? MathF.PI : 2.5132742f;
-                this.DrawCaughtFishHeldSprite(
-                    spriteBatch,
-                    fishTexture,
-                    fishSourceRect,
-                    Game1.GlobalToLocal(Game1.viewport, farmer.Position + new Vector2(-12f * i, CaughtFishHeldBaseYOffset)),
-                    GetHeldFishBaseRotation(rod) > 0f ? bonusRotation : 0f,
-                    standingPixelY / 10000f + 0.058f
-                );
-            }
-
-            string fishName = fishData.DisplayName ?? "???";
+            string fishName = state.VisualData.FishDisplayName;
             Vector2 fishNameSize = Game1.smallFont.MeasureString(fishName);
             spriteBatch.DrawString(
                 Game1.smallFont,
@@ -573,15 +572,15 @@ namespace FishSlapper.Rendering
                     Game1.viewport,
                     farmer.Position + new Vector2(26f - fishNameSize.X / 2f, -278f + boardBobOffset)
                 ),
-                rod.bossFish ? new Color(126, 61, 237) : Game1.textColor,
+                state.VisualData.BossFish ? new Color(126, 61, 237) : Game1.textColor,
                 0f,
                 Vector2.Zero,
                 1f,
                 SpriteEffects.None,
-                boardLayerDepth
+                textLayerDepth
             );
 
-            if (rod.fishSize == -1)
+            if (state.VisualData.FishSize == -1)
                 return;
 
             string sizeLabel = Game1.content.LoadString(@"Strings\StringsFromCSFiles:FishingRod.cs.14082");
@@ -594,12 +593,12 @@ namespace FishSlapper.Rendering
                 Vector2.Zero,
                 1f,
                 SpriteEffects.None,
-                boardLayerDepth
+                textLayerDepth
             );
 
             double displaySize = LocalizedContentManager.CurrentLanguageCode == LocalizedContentManager.LanguageCode.en
-                ? rod.fishSize
-                : Math.Round(rod.fishSize * 2.54);
+                ? state.VisualData.FishSize
+                : Math.Round(state.VisualData.FishSize * 2.54);
             string sizeText = Game1.content.LoadString(@"Strings\StringsFromCSFiles:FishingRod.cs.14083", displaySize);
             Vector2 sizeTextSize = Game1.smallFont.MeasureString(sizeText);
             spriteBatch.DrawString(
@@ -609,47 +608,115 @@ namespace FishSlapper.Rendering
                     Game1.viewport,
                     farmer.Position + new Vector2(85f - sizeTextSize.X / 2f, -179f + boardBobOffset)
                 ),
-                rod.recordSize ? Color.Blue : Game1.textColor,
+                state.VisualData.RecordSize ? Color.Blue : Game1.textColor,
                 0f,
                 Vector2.Zero,
                 1f,
                 SpriteEffects.None,
-                boardLayerDepth
+                textLayerDepth
             );
         }
 
-        private Farmer PrepareDiveRenderFarmer(DiveSlapSession session)
+        private void DrawCaughtFishHeldPreview(SpriteBatch spriteBatch, Farmer farmer, CaughtFishRenderState state)
         {
-            this.diveRenderFarmer ??= Game1.player.CreateFakeEventFarmer();
+            if (string.IsNullOrWhiteSpace(state.VisualData.FishQualifiedItemId))
+                return;
 
-            Farmer renderFarmer = this.diveRenderFarmer;
+            int standingPixelY = farmer.StandingPixel.Y;
+            var fishData = ItemRegistry.GetMetadata(state.VisualData.FishQualifiedItemId).GetParsedOrErrorData();
+            Texture2D fishTexture = fishData.GetTexture();
+            Rectangle fishSourceRect = fishData.GetSourceRect(0, null);
+
+            this.DrawCaughtFishHeldSprite(
+                spriteBatch,
+                fishTexture,
+                fishSourceRect,
+                Game1.GlobalToLocal(
+                    Game1.viewport,
+                    farmer.Position + new Vector2(state.FishTwitchOffsetX, CaughtFishHeldBaseYOffset + state.FishTwitchOffsetY)
+                ),
+                GetHeldFishBaseRotation(state.VisualData.FishQualifiedItemId) + state.FishTwitchRotation,
+                standingPixelY / 10000f + 0.062f
+            );
+
+            for (int i = 1; i < state.VisualData.NumberOfFishCaught; i++)
+            {
+                float bonusRotation = i == 2 ? MathF.PI : 2.5132742f;
+                this.DrawCaughtFishHeldSprite(
+                    spriteBatch,
+                    fishTexture,
+                    fishSourceRect,
+                    Game1.GlobalToLocal(Game1.viewport, farmer.Position + new Vector2(-12f * i, CaughtFishHeldBaseYOffset)),
+                    GetHeldFishBaseRotation(state.VisualData.FishQualifiedItemId) > 0f ? bonusRotation : 0f,
+                    standingPixelY / 10000f + 0.058f
+                );
+            }
+        }
+
+        private Farmer PrepareDiveRenderFarmer(Farmer sourceFarmer, IDiveSlapRenderState state)
+        {
+            Farmer renderFarmer = this.GetOrCreateRenderFarmer(sourceFarmer);
             // 跳水时不真的移动玩家本体，而是把原版 farmer.draw 替换成这只 fake farmer。
             // 这样能吃到原版的环境着色、图层和农夫外观，但不会干扰玩家真实位置和碰撞。
-            renderFarmer.currentLocation = Game1.currentLocation;
-            renderFarmer.Position = session.RenderPosition;
-            if (session.State == DiveSlapState.ResolveSuccess)
+            renderFarmer.currentLocation = sourceFarmer.currentLocation;
+            renderFarmer.Position = state.RenderPosition;
+            if (state.State == DiveSlapState.ResolveSuccess)
             {
                 renderFarmer.Halt();
                 renderFarmer.faceDirection(2);
             }
             else
             {
-                renderFarmer.faceDirection(GetDiveFacingDirection(session));
+                renderFarmer.faceDirection(GetDiveFacingDirection(state));
             }
             renderFarmer.UsingTool = false;
             renderFarmer.canReleaseTool = false;
-            renderFarmer.swimming.Value = ShouldRenderDiveAsSwimming(session);
+            renderFarmer.swimming.Value = ShouldRenderDiveAsSwimming(state);
             renderFarmer.bathingClothes.Value = renderFarmer.swimming.Value;
             renderFarmer.yOffset = 0f;
+            ClearRenderFarmerToolVisuals(renderFarmer);
 
-            if (session.State == DiveSlapState.ResolveSuccess)
+            if (state.State == DiveSlapState.ResolveSuccess)
             {
                 this.ApplyCarryHoldPose(renderFarmer);
                 return renderFarmer;
             }
 
-            int frame = GetDiveFrame(session);
+            int frame = GetDiveFrame(state);
             this.ApplyPose(renderFarmer, frame);
+            return renderFarmer;
+        }
+
+        private Farmer PrepareCaughtFishRenderFarmer(Farmer sourceFarmer, CaughtFishRenderState state)
+        {
+            Farmer renderFarmer = this.GetOrCreateRenderFarmer(sourceFarmer);
+            renderFarmer.currentLocation = sourceFarmer.currentLocation;
+            renderFarmer.Position = sourceFarmer.Position;
+            renderFarmer.faceDirection(state.VisualData.FacingDirection);
+            renderFarmer.UsingTool = false;
+            renderFarmer.canReleaseTool = false;
+            renderFarmer.swimming.Value = false;
+            renderFarmer.bathingClothes.Value = false;
+            renderFarmer.yOffset = sourceFarmer.yOffset;
+            ClearRenderFarmerToolVisuals(renderFarmer);
+
+            int frame = state.StandFrameTicksRemaining > 0
+                ? GetStandingFrame(state.VisualData.FacingDirection)
+                : CaughtFishPunchFrame;
+            this.ApplyPose(renderFarmer, frame);
+            return renderFarmer;
+        }
+
+        private Farmer GetOrCreateRenderFarmer(Farmer sourceFarmer)
+        {
+            long playerId = sourceFarmer.UniqueMultiplayerID;
+            if (!this.renderFarmers.TryGetValue(playerId, out Farmer? renderFarmer))
+            {
+                renderFarmer = sourceFarmer.CreateFakeEventFarmer();
+                this.renderFarmers[playerId] = renderFarmer;
+                this.replacementRenderFarmers.Add(renderFarmer);
+            }
+
             return renderFarmer;
         }
 
@@ -670,11 +737,18 @@ namespace FishSlapper.Rendering
             farmer.FarmerSprite.setCurrentFrame(DiveSuccessHoldDownFrame, 1);
         }
 
-        private void UpdateSwimShadowAnimation(DiveSlapSession? session)
+        private static void ClearRenderFarmerToolVisuals(Farmer farmer)
         {
-            if (session is null || !ShouldRenderDiveAsSwimming(session))
+            farmer.CurrentTool = null;
+            farmer.armOffset = Vector2.Zero;
+        }
+
+        private void UpdateSwimShadowAnimation(IDiveSlapRenderState? session, uint ticks)
+        {
+            if (this.lastSwimShadowUpdateTick == ticks)
                 return;
 
+            this.lastSwimShadowUpdateTick = ticks;
             this.swimShadowTimer -= Game1.currentGameTime.ElapsedGameTime.Milliseconds;
             if (this.swimShadowTimer > 0)
                 return;
@@ -718,7 +792,7 @@ namespace FishSlapper.Rendering
             };
         }
 
-        private static int GetDiveFrame(DiveSlapSession session)
+        private static int GetDiveFrame(IDiveSlapRenderState session)
         {
             int facingDirection = GetDiveFacingDirection(session);
             return session.State switch
@@ -759,7 +833,7 @@ namespace FishSlapper.Rendering
             };
         }
 
-        private static int GetDiveFacingDirection(DiveSlapSession session)
+        private static int GetDiveFacingDirection(IDiveSlapRenderState session)
         {
             if (session.State == DiveSlapState.Slapping && session.SlapAnimationTicksRemaining > 0)
                 return session.FacingRight ? 1 : 3;
@@ -777,7 +851,7 @@ namespace FishSlapper.Rendering
             return GetStandingFrame(facingDirection);
         }
 
-        private static bool ShouldRenderDiveAsSwimming(DiveSlapSession session)
+        private static bool ShouldRenderDiveAsSwimming(IDiveSlapRenderState session)
         {
             return session.State is DiveSlapState.Slapping
                 or DiveSlapState.ResolveSuccessPauseBefore
@@ -795,14 +869,6 @@ namespace FishSlapper.Rendering
                 2 => 0,
                 _ => 1
             };
-        }
-
-        private static float GetHeldFishBaseRotation(StardewValley.Tools.FishingRod rod)
-        {
-            if (rod.whichFish is null || rod.fishSize == -1)
-                return 0f;
-
-            return GetHeldFishBaseRotation(rod.whichFish.QualifiedItemId);
         }
 
         private static float GetHeldFishBaseRotation(string? itemId)
@@ -834,7 +900,22 @@ namespace FishSlapper.Rendering
             );
         }
 
-        private void DrawSlapProgressHud(SpriteBatch spriteBatch, DiveSlapSession session)
+        private void DrawDiveOverlays(SpriteBatch spriteBatch, IDiveSlapRenderState? session)
+        {
+            if (session is null)
+                return;
+
+            if (session.State == DiveSlapState.Slapping)
+                this.DrawDiveSlapFish(spriteBatch, session);
+
+            if (IsDiveSuccessHeldFishVisible(session))
+                this.DrawDiveSuccessHeldFish(spriteBatch, session);
+
+            if (session.State == DiveSlapState.ResolveFail)
+                this.DrawFailRetaliationFish(spriteBatch, session);
+        }
+
+        private void DrawSlapProgressHud(SpriteBatch spriteBatch, IDiveSlapRenderState session)
         {
             this.EnsurePixelTexture();
             if (this.pixelTexture is null || session.RequiredHits <= 0)
@@ -884,7 +965,7 @@ namespace FishSlapper.Rendering
             }
         }
 
-        private void DrawFailRetaliationFish(SpriteBatch spriteBatch, DiveSlapSession session)
+        private void DrawFailRetaliationFish(SpriteBatch spriteBatch, IDiveSlapRenderState session)
         {
             if (string.IsNullOrWhiteSpace(session.TargetFishQualifiedItemId))
                 return;
@@ -909,7 +990,7 @@ namespace FishSlapper.Rendering
             );
         }
 
-        private void DrawDiveSlapFish(SpriteBatch spriteBatch, DiveSlapSession session)
+        private void DrawDiveSlapFish(SpriteBatch spriteBatch, IDiveSlapRenderState session)
         {
             if (string.IsNullOrWhiteSpace(session.TargetFishQualifiedItemId))
                 return;
@@ -934,7 +1015,7 @@ namespace FishSlapper.Rendering
             );
         }
 
-        private void DrawDiveSuccessHeldFish(SpriteBatch spriteBatch, DiveSlapSession session)
+        private void DrawDiveSuccessHeldFish(SpriteBatch spriteBatch, IDiveSlapRenderState session)
         {
             if (string.IsNullOrWhiteSpace(session.TargetFishQualifiedItemId))
                 return;
@@ -1042,12 +1123,97 @@ namespace FishSlapper.Rendering
             return new Vector2(viewportOffset.X + 32f, viewportOffset.Y);
         }
 
-        private float GetPhaseProgress(DiveSlapSession session)
+        private float GetPhaseProgress(IDiveSlapRenderState session)
         {
             float progress = session.PhaseDurationTicks <= 0
                 ? 1f
                 : 1f - (float)session.PhaseTicksRemaining / session.PhaseDurationTicks;
             return MathHelper.Clamp(progress, 0f, 1f);
+        }
+
+        private void UpdateCaughtFishRenderStates()
+        {
+            foreach (CaughtFishRenderState state in this.caughtFishRenderStates.Values)
+            {
+                if (state.AnimationTick >= 0)
+                {
+                    state.AnimationTick++;
+                    if (state.AnimationTick > CaughtFishSlapDurationTicks)
+                        state.AnimationTick = -1;
+                }
+
+                if (!IsCaughtFishTwitchActive(state))
+                    continue;
+
+                state.FishTwitchOffsetX += state.FishTwitchVelocityX;
+                state.FishTwitchOffsetY += state.FishTwitchVelocityY;
+                state.FishTwitchRotation += state.FishTwitchRotationVelocity;
+                state.FishTwitchVelocityX *= 0.72f;
+                state.FishTwitchVelocityY += 1.1f;
+                state.FishTwitchRotationVelocity *= 0.78f;
+                if (state.FishTwitchOffsetY >= 0f)
+                {
+                    state.FishTwitchOffsetY = 0f;
+                    if (state.FishTwitchBouncesRemaining > 0)
+                    {
+                        state.FishTwitchVelocityY = CaughtFishBounceJumpVelocity;
+                        state.FishTwitchRotationVelocity = -state.FishTwitchRotationVelocity * 0.6f;
+                        state.FishTwitchBouncesRemaining--;
+                    }
+                    else
+                    {
+                        state.FishTwitchVelocityY = 0f;
+                    }
+                }
+
+                if (MathF.Abs(state.FishTwitchOffsetX) < 0.05f && MathF.Abs(state.FishTwitchVelocityX) < 0.05f)
+                {
+                    state.FishTwitchOffsetX = 0f;
+                    state.FishTwitchVelocityX = 0f;
+                }
+
+                if (MathF.Abs(state.FishTwitchRotation) < 0.005f && MathF.Abs(state.FishTwitchRotationVelocity) < 0.005f)
+                {
+                    state.FishTwitchRotation = 0f;
+                    state.FishTwitchRotationVelocity = 0f;
+                }
+            }
+
+            foreach (CaughtFishRenderState state in this.caughtFishRenderStates.Values)
+            {
+                if (state.StandFrameTicksRemaining > 0)
+                    state.StandFrameTicksRemaining--;
+            }
+
+            List<long>? staleIds = null;
+            foreach ((long playerId, CaughtFishRenderState state) in this.caughtFishRenderStates)
+            {
+                if (state.AnimationTick < 0 && !IsCaughtFishTwitchActive(state))
+                {
+                    staleIds ??= new List<long>();
+                    staleIds.Add(playerId);
+                }
+            }
+
+            if (staleIds is null)
+                return;
+
+            foreach (long staleId in staleIds)
+                this.caughtFishRenderStates.Remove(staleId);
+        }
+
+        private void UpdateBurstParticles()
+        {
+            foreach (BurstParticle particle in this.burstParticles)
+            {
+                particle.WorldPos += particle.Velocity;
+                particle.Velocity *= 0.91f;
+                particle.Velocity.Y += particle.Gravity;
+                particle.Alpha -= particle.AlphaDecay;
+                particle.Rotation += particle.RotationSpeed;
+            }
+
+            this.burstParticles.RemoveAll(p => p.Alpha <= 0f);
         }
 
         private void StartDiveSlapFishJump(DiveSlapSession session)
@@ -1114,7 +1280,7 @@ namespace FishSlapper.Rendering
             }
         }
 
-        private static Vector2 GetDiveSlapFishWorldPosition(DiveSlapSession session)
+        private static Vector2 GetDiveSlapFishWorldPosition(IDiveSlapRenderState session)
         {
             float idleBobOffsetY = IsDiveSlapFishAnimationActive(session)
                 ? 0f
@@ -1122,18 +1288,18 @@ namespace FishSlapper.Rendering
             return session.SlapFishSurfacePosition + new Vector2(session.SlapFishOffsetX, session.SlapFishOffsetY + idleBobOffsetY);
         }
 
-        private static Vector2 GetDiveSuccessHeldFishWorldPosition(DiveSlapSession session)
+        private static Vector2 GetDiveSuccessHeldFishWorldPosition(IDiveSlapRenderState session)
         {
             return session.RenderPosition + new Vector2(32f, -90f);
         }
 
-        private static bool IsDiveSuccessHeldFishVisible(DiveSlapSession session)
+        private static bool IsDiveSuccessHeldFishVisible(IDiveSlapRenderState session)
         {
             return session.State == DiveSlapState.ResolveSuccess
                 || (session.State == DiveSlapState.Returning && !session.OutcomeApplied);
         }
 
-        private static bool IsDiveSlapFishAnimationActive(DiveSlapSession session)
+        private static bool IsDiveSlapFishAnimationActive(IDiveSlapRenderState session)
         {
             return session.SlapFishVelocityX != 0f
                 || session.SlapFishVelocityY != 0f
@@ -1143,7 +1309,17 @@ namespace FishSlapper.Rendering
                 || session.SlapFishRotationVelocity != 0f;
         }
 
-        private static Vector2 GetFailRetaliationFishWorldPosition(DiveSlapSession session, float progress)
+        private static bool IsCaughtFishTwitchActive(CaughtFishRenderState state)
+        {
+            return state.FishTwitchVelocityX != 0f
+                || state.FishTwitchVelocityY != 0f
+                || state.FishTwitchOffsetX != 0f
+                || state.FishTwitchOffsetY < 0f
+                || state.FishTwitchRotation != 0f
+                || state.FishTwitchRotationVelocity != 0f;
+        }
+
+        private static Vector2 GetFailRetaliationFishWorldPosition(IDiveSlapRenderState session, float progress)
         {
             progress = MathHelper.Clamp(progress, 0f, 1f);
             if (progress <= FailRetaliationImpactProgress)
@@ -1166,7 +1342,7 @@ namespace FishSlapper.Rendering
             );
         }
 
-        private float GetFailRetaliationFishRotation(DiveSlapSession session)
+        private float GetFailRetaliationFishRotation(IDiveSlapRenderState session)
         {
             float progress = this.GetPhaseProgress(session);
             float previousProgress = Math.Max(0f, progress - 0.015f);
@@ -1443,10 +1619,20 @@ namespace FishSlapper.Rendering
 
         private void EnsurePixelTexture()
         {
-            if (this.pixelTexture != null)
+            GraphicsDevice? graphicsDevice = Game1.graphics?.GraphicsDevice;
+            if (graphicsDevice is null || graphicsDevice.IsDisposed)
                 return;
 
-            this.pixelTexture = new Texture2D(Game1.graphics.GraphicsDevice, 1, 1);
+            if (this.pixelTexture is not null)
+            {
+                if (!this.pixelTexture.IsDisposed && ReferenceEquals(this.pixelTexture.GraphicsDevice, graphicsDevice))
+                    return;
+
+                this.pixelTexture.Dispose();
+                this.pixelTexture = null;
+            }
+
+            this.pixelTexture = new Texture2D(graphicsDevice, 1, 1);
             this.pixelTexture.SetData(new[] { Color.White });
         }
 
@@ -1460,10 +1646,25 @@ namespace FishSlapper.Rendering
             {
                 this.mobileAtlasTexture = Game1.content.Load<Texture2D>(@"LooseSprites\MobileAtlas_manually_made");
             }
-            catch
+            catch (ContentLoadException)
             {
                 this.mobileAtlasTexture = null;
             }
+        }
+
+        private void ReleaseGraphicsResources()
+        {
+            if (this.pixelTexture is not null)
+            {
+                if (!this.pixelTexture.IsDisposed)
+                    this.pixelTexture.Dispose();
+
+                this.pixelTexture = null;
+            }
+
+            this.mobileAtlasTexture = null;
+            this.swimShadowTexture = null;
+            this.attemptedMobileAtlasLoad = false;
         }
 
         private void EnsureSwimShadowTexture()

@@ -1,7 +1,7 @@
 {
    "Name": "Fish Slapper",
    "Author": "iwyxdxl",
-   "Version": "1.2.2",
+   "Version": "1.3.0",
    "Description": "Slap the fish！",
    "UniqueID": "iwyxdxl.FishSlapper",
    "EntryDll": "FishSlapper.dll",

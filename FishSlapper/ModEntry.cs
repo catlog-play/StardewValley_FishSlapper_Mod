@@ -8,6 +8,7 @@ using HarmonyLib;
 using Microsoft.Xna.Framework.Graphics;
 using StardewModdingAPI;
 using StardewModdingAPI.Events;
+using StardewModdingAPI.Utilities;
 using StardewValley;
 using StardewValley.Menus;
 
@@ -18,8 +19,8 @@ namespace FishSlapper
         private ModConfig Config = null!;
         private DiveSlapController Controller = null!;
         private DiveSlapRenderer Renderer = null!;
-        private DiveSlapRenderer.MobileActionButtonsLayout cachedMobileLayout;
-        private bool cachedMobileLayoutUiScaled;
+        private readonly PerScreen<DiveSlapRenderer.MobileActionButtonsLayout> cachedMobileLayout = new();
+        private readonly PerScreen<bool> cachedMobileLayoutUiScaled = new();
 
         public override void Entry(IModHelper helper)
         {
@@ -28,6 +29,7 @@ namespace FishSlapper
             this.Controller = new DiveSlapController(
                 helper,
                 this.Monitor,
+                this.ModManifest.UniqueID,
                 this.Config,
                 this.Renderer,
                 new VanillaFishingBridge()
@@ -36,12 +38,12 @@ namespace FishSlapper
             var harmony = new Harmony(this.ModManifest.UniqueID);
             BobberBarPatch.Initialize(this.Controller);
             FarmerDrawPatch.Initialize(this.Controller);
-            FishingRodDrawPatch.Initialize(this.Controller);
             Game1DrawToolPatch.Initialize(this.Controller);
+            FishingRodDrawPatch.Initialize(this.Controller);
             BobberBarPatch.Apply(harmony);
             FarmerDrawPatch.Apply(harmony);
-            FishingRodDrawPatch.Apply(harmony);
             Game1DrawToolPatch.Apply(harmony);
+            FishingRodDrawPatch.Apply(harmony);
 
             helper.Events.Input.ButtonPressed += this.OnButtonPressed;
             helper.Events.Content.AssetRequested += this.OnAssetRequested;
@@ -51,6 +53,8 @@ namespace FishSlapper
             helper.Events.Display.MenuChanged += this.OnMenuChanged;
             helper.Events.GameLoop.UpdateTicked += this.OnUpdateTicked;
             helper.Events.GameLoop.GameLaunched += this.OnGameLaunched;
+            helper.Events.Multiplayer.ModMessageReceived += this.OnModMessageReceived;
+            helper.Events.Multiplayer.PeerDisconnected += this.OnPeerDisconnected;
         }
 
         private void OnGameLaunched(object? sender, GameLaunchedEventArgs e)
@@ -143,7 +147,7 @@ namespace FishSlapper
 
         private void OnUpdateTicked(object? sender, UpdateTickedEventArgs e)
         {
-            this.Controller.OnUpdateTicked();
+            this.Controller.OnUpdateTicked(e.Ticks);
         }
 
         private void OnRenderingWorld(object? sender, RenderingWorldEventArgs e)
@@ -157,7 +161,7 @@ namespace FishSlapper
             string? slapPrompt = slapKey is not null
                 ? this.Helper.Translation.Get("hud.slap-prompt", new { key = slapKey }).ToString()
                 : null;
-            this.Renderer.OnRenderedWorld(e, this.Controller.ActiveSession, slapPrompt);
+            this.Renderer.OnRenderedWorld(e, this.Controller.ActiveSession, this.Controller.GetObservedDiveStatesForCurrentScreen(), slapPrompt);
 
             if (Game1.activeClickableMenu is null)
                 this.DrawMobileActionButtons(e.SpriteBatch, uiScaled: false);
@@ -180,11 +184,21 @@ namespace FishSlapper
             this.Controller.OnMenuChanged(e);
         }
 
+        private void OnModMessageReceived(object? sender, ModMessageReceivedEventArgs e)
+        {
+            this.Controller.OnModMessageReceived(e);
+        }
+
+        private void OnPeerDisconnected(object? sender, PeerDisconnectedEventArgs e)
+        {
+            this.Controller.OnPeerDisconnected(e);
+        }
+
         private void DrawMobileActionButtons(SpriteBatch spriteBatch, bool uiScaled)
         {
             var layout = this.GetMobileActionButtonsLayout(uiScaled);
-            this.cachedMobileLayout = layout;
-            this.cachedMobileLayoutUiScaled = uiScaled;
+            this.cachedMobileLayout.Value = layout;
+            this.cachedMobileLayoutUiScaled.Value = uiScaled;
 
             if (!layout.HasAnyButton)
                 return;
@@ -215,14 +229,14 @@ namespace FishSlapper
             // 使用上一帧绘制时缓存的 layout，保证 bounds 与玩家看到的按钮位置一致。
             // 手机端 pinch-zoom 会在帧间持续改变 viewport，
             // 如果此处重新计算 layout，位置可能与已绘制的按钮产生偏差。
-            var layout = this.cachedMobileLayout;
+            var layout = this.cachedMobileLayout.Value;
             if (!layout.HasAnyButton)
                 return false;
 
             // 使用 Game1.getMouseX/Y 而非 ScreenPixels：
             // 前者基于 getMouseXRaw() 并除以 SpriteBatch 对应的缩放系数，
             // 在所有平台（PC / Android / iOS）上都与绘制坐标空间一致。
-            bool uiScaled = this.cachedMobileLayoutUiScaled;
+            bool uiScaled = this.cachedMobileLayoutUiScaled.Value;
             int cursorX = Game1.getMouseX(ui_scale: uiScaled);
             int cursorY = Game1.getMouseY(ui_scale: uiScaled);
 

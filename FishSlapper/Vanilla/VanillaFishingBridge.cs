@@ -16,17 +16,17 @@ namespace FishSlapper.Vanilla
         private static readonly Vector2 DiveStrikeToFarmerOffsetUp = new(-32f, 0f);
         private const float UpCastRightSideDeadZone = 16f;
 
-        public bool TryGetCaughtFishRod(out FishingRod? rod)
+        public bool TryGetCaughtFishRod(Farmer player, out FishingRod? rod)
         {
-            rod = Game1.player?.CurrentTool as FishingRod;
+            rod = player.CurrentTool as FishingRod;
             return rod is not null && rod.fishCaught;
         }
 
-        public bool CanCreateDiveSession()
+        public bool CanCreateDiveSession(Farmer player, IClickableMenu? activeMenu)
         {
             if (!Context.IsWorldReady
-                || Game1.player.CurrentTool is not FishingRod rod
-                || Game1.activeClickableMenu is not BobberBar)
+                || player.CurrentTool is not FishingRod rod
+                || activeMenu is not BobberBar)
             {
                 return false;
             }
@@ -42,20 +42,20 @@ namespace FishSlapper.Vanilla
                 && !float.IsInfinity(bobberPosition.Y);
         }
 
-        public bool TryCreateDiveSession(out DiveSlapSession? session)
+        public bool TryCreateDiveSession(Farmer player, IClickableMenu? activeMenu, out DiveSlapSession? session)
         {
             session = null;
 
             // CanCreateDiveSession 已验证 FishingRod/BobberBar 存在，
             // 此处的模式匹配仅用于 C# 类型窄化以获取局部变量。
-            if (!this.CanCreateDiveSession()
-                || Game1.player.CurrentTool is not FishingRod rod
-                || Game1.activeClickableMenu is not BobberBar bobberBar)
+            if (!this.CanCreateDiveSession(player, activeMenu)
+                || player.CurrentTool is not FishingRod rod
+                || activeMenu is not BobberBar bobberBar)
                 return false;
 
             Vector2 bobberPosition = rod.bobber.Get();
-            Vector2 originalPlayerPosition = Game1.player.Position;
-            int castFacingDirection = ResolveDiveCastFacingDirection(rod, originalPlayerPosition, bobberPosition);
+            Vector2 originalPlayerPosition = player.Position;
+            int castFacingDirection = ResolveDiveCastFacingDirection(player, rod, originalPlayerPosition, bobberPosition);
             DiveDifficultyProfile difficultyProfile = ResolveDiveDifficultyProfile(bobberBar);
             string qualifiedFishId = bobberBar.whichFish;
             var fishMetadata = ItemRegistry.GetMetadata(qualifiedFishId);
@@ -67,15 +67,18 @@ namespace FishSlapper.Vanilla
 
             session = new DiveSlapSession
             {
+                Owner = player,
+                OwnerPlayerId = player.UniqueMultiplayerID,
+                LocationName = player.currentLocation?.NameOrUniqueName ?? string.Empty,
                 Rod = rod,
                 BobberBar = bobberBar,
                 OriginalPlayerPosition = originalPlayerPosition,
                 TargetBobberPosition = bobberPosition,
                 CastFacingDirection = castFacingDirection,
                 FacingRight = ResolveDiveStrikeSide(castFacingDirection, originalPlayerPosition, bobberPosition),
-                PreviousFacingDirection = Game1.player.FacingDirection,
-                PreviousCanMove = Game1.player.canMove,
-                PreviousFreezePause = Game1.player.freezePause,
+                PreviousFacingDirection = player.FacingDirection,
+                PreviousCanMove = player.canMove,
+                PreviousFreezePause = player.freezePause,
                 RequiredHits = difficultyProfile.RequiredHits,
                 TotalSlapTicks = difficultyProfile.DurationTicks,
                 RemainingSlapTicks = difficultyProfile.DurationTicks,
@@ -121,24 +124,24 @@ namespace FishSlapper.Vanilla
 
         public void ApplySuccess(DiveSlapSession session)
         {
+            Farmer player = session.Owner;
             BobberBar bobberBar = session.BobberBar;
             FishingRod rod = session.Rod;
-            // 跳水成功固定取消 perfect，不再提供配置开关。
-            bool wasPerfect = false;
-            int resolvedFishQuality = ResolveFishQuality(bobberBar.fishQuality, wasPerfect);
+            // 跳水成功固定取消 perfect，不再提供升品或经验加成。
+            int resolvedFishQuality = Math.Max(0, bobberBar.fishQuality);
 
             if (!bobberBar.fromFishPond && bobberBar.whichFish.StartsWith("(O)", StringComparison.Ordinal))
-                AwardFishingExperience(bobberBar, wasPerfect);
+                AwardFishingExperience(player, bobberBar);
 
-            rod.lastUser = Game1.player;
-            rod.originalFacingDirection = Game1.player.FacingDirection;
+            rod.lastUser = player;
+            rod.originalFacingDirection = player.FacingDirection;
             rod.whichFish = ItemRegistry.GetMetadata(bobberBar.whichFish);
             rod.fishSize = bobberBar.fishSize;
             rod.fishQuality = resolvedFishQuality;
             rod.treasureCaught = false;
             rod.fromFishPond = bobberBar.fromFishPond;
             rod.setFlagOnCatch = string.IsNullOrEmpty(bobberBar.setFlagOnCatch) ? null : bobberBar.setFlagOnCatch;
-            rod.numberOfFishCaught = ResolveNumberOfFishCaught(rod, bobberBar);
+            rod.numberOfFishCaught = ResolveNumberOfFishCaught(player, rod, bobberBar);
             rod.bossFish = bobberBar.bossFish;
             rod.fishCaught = false;
             rod.pullingOutOfWater = false;
@@ -157,7 +160,7 @@ namespace FishSlapper.Vanilla
             Game1.playSound("jingle1");
             rod.playerCaughtFishEndFunction(bobberBar.bossFish);
             if (!Game1.isFestival())
-                rod.doneHoldingFish(Game1.player, false);
+                rod.doneHoldingFish(player, false);
         }
 
         public void ApplyFailure(DiveSlapSession session)
@@ -167,27 +170,16 @@ namespace FishSlapper.Vanilla
 
             Game1.playSound("fishEscape");
             Game1.activeClickableMenu = null;
-            session.Rod.doneFishing(Game1.player, true);
+            session.Rod.doneFishing(session.Owner, true);
         }
 
-        private static int ResolveFishQuality(int baseFishQuality, bool wasPerfect)
-        {
-            if (baseFishQuality >= 2 && wasPerfect)
-                return 4;
-
-            if (baseFishQuality >= 1 && wasPerfect)
-                return 2;
-
-            return Math.Max(0, baseFishQuality);
-        }
-
-        private static int ResolveNumberOfFishCaught(FishingRod rod, BobberBar bobberBar)
+        private static int ResolveNumberOfFishCaught(Farmer player, FishingRod rod, BobberBar bobberBar)
         {
             int numCaught = 1;
             string? baitId = rod.GetBait()?.QualifiedItemId;
 
             if (!bobberBar.bossFish && string.Equals(baitId, "(O)774", StringComparison.Ordinal))
-                numCaught = Game1.random.NextDouble() < 0.25 + Game1.player.DailyLuck / 2.0 ? 1 : 2;
+                numCaught = Game1.random.NextDouble() < 0.25 + player.DailyLuck / 2.0 ? 1 : 2;
 
             if (bobberBar.challengeBaitFishes > 0)
                 numCaught = bobberBar.challengeBaitFishes;
@@ -195,19 +187,16 @@ namespace FishSlapper.Vanilla
             return Math.Max(1, numCaught);
         }
 
-        private static void AwardFishingExperience(BobberBar bobberBar, bool wasPerfect)
+        private static void AwardFishingExperience(Farmer player, BobberBar bobberBar)
         {
             int experience = Math.Max(1, (bobberBar.fishQuality + 1) * 3 + (int)bobberBar.difficulty / 3);
             if (bobberBar.treasureCaught)
                 experience += (int)(experience * 1.2f);
 
-            if (wasPerfect)
-                experience += (int)(experience * 1.4f);
-
             if (bobberBar.bossFish)
                 experience *= 5;
 
-            Game1.player.gainExperience(Farmer.fishingSkill, experience);
+            player.gainExperience(Farmer.fishingSkill, experience);
         }
 
         private static DiveDifficultyProfile ResolveDiveDifficultyProfile(BobberBar bobberBar)
@@ -320,7 +309,7 @@ namespace FishSlapper.Vanilla
             return diveRenderPosition + new Vector2(34f, -38f);
         }
 
-        private static int ResolveDiveCastFacingDirection(FishingRod rod, Vector2 originalPlayerPosition, Vector2 bobberPosition)
+        private static int ResolveDiveCastFacingDirection(Farmer player, FishingRod rod, Vector2 originalPlayerPosition, Vector2 bobberPosition)
         {
             // 优先使用 FishingRod 自己记录的抛竿方向。
             // 如果某些情况下拿不到，再逐级退化到原朝向/玩家朝向/鱼钩相对位置。
@@ -332,7 +321,7 @@ namespace FishSlapper.Vanilla
             if (IsFacingDirection(direction))
                 return direction;
 
-            direction = Game1.player.FacingDirection;
+            direction = player.FacingDirection;
             if (IsFacingDirection(direction))
                 return direction;
 

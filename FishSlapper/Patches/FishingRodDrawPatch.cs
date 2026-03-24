@@ -1,6 +1,4 @@
 using HarmonyLib;
-using Microsoft.Xna.Framework.Graphics;
-using StardewValley;
 using StardewValley.Tools;
 using FishSlapper.Gameplay;
 
@@ -17,23 +15,17 @@ namespace FishSlapper.Patches
 
         public static void Apply(Harmony harmony)
         {
-            var original = AccessTools.Method(typeof(FishingRod), nameof(FishingRod.draw), new[] { typeof(SpriteBatch) });
-            if (original is null)
-                return;
-
-            harmony.Patch(original, prefix: new HarmonyMethod(typeof(FishingRodDrawPatch), nameof(PrefixDraw)));
+            var original = AccessTools.DeclaredMethod(typeof(FishingRod), nameof(FishingRod.draw), new[] { typeof(Microsoft.Xna.Framework.Graphics.SpriteBatch) });
+            if (original is not null)
+                harmony.Patch(original, prefix: new HarmonyMethod(typeof(FishingRodDrawPatch), nameof(PrefixDraw)));
         }
 
-        private static bool PrefixDraw(FishingRod __instance, SpriteBatch b)
+        private static bool PrefixDraw(FishingRod __instance)
         {
             if (FishingRodDrawPatch.controller is null)
                 return true;
 
-            Farmer drawFarmer = __instance.lastUser ?? Game1.player;
-            if (!FishingRodDrawPatch.controller.ShouldHideCaughtFishToolPreview(drawFarmer))
-                return true;
-
-            return !FishingRodDrawPatch.controller.TryDrawCaughtFishPreview(__instance, b, drawFarmer);
+            return !FishingRodDrawPatch.controller.ShouldSuppressFishingRodDraw(__instance);
         }
     }
 }
