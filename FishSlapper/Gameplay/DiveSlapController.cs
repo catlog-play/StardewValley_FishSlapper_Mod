@@ -16,8 +16,8 @@ namespace FishSlapper.Gameplay
 {
     internal sealed class DiveSlapController
     {
-        private const int DiveSlapHealthCost = 20;
-        private const float DiveSlapStaminaCost = 50f;
+        private const int DiveSlapHealthCost = 0;
+        private const float DiveSlapStaminaCost = -16f;
         private const int WindupTicks = 8;
         private const int DivingTicks = 45;
         private const int SuccessReturnDelayTicks = 30;
