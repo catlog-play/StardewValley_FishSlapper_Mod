@@ -130,8 +130,12 @@ namespace FishSlapper.Vanilla
             // 跳水成功固定取消 perfect，不再提供升品或经验加成。
             int resolvedFishQuality = Math.Max(0, bobberBar.fishQuality);
 
-            if (!bobberBar.fromFishPond && bobberBar.whichFish.StartsWith("(O)", StringComparison.Ordinal))
-                AwardFishingExperience(player, bobberBar);
+            if (!bobberBar.fromFishPond && bobberBar.whichFish.StartsWith("(O)", StringComparison.Ordinal)){
+                AwardFishingExperience(player, bobberBar,false);
+            }else{
+                resolvedFishQuality+=1;
+                AwardFishingExperience(player, bobberBar,true);
+            }
 
             rod.lastUser = player;
             rod.originalFacingDirection = player.FacingDirection;
@@ -187,7 +191,7 @@ namespace FishSlapper.Vanilla
             return Math.Max(1, numCaught);
         }
 
-        private static void AwardFishingExperience(Farmer player, BobberBar bobberBar)
+        private static void AwardFishingExperience(Farmer player, BobberBar bobberBar,bool flag)
         {
             int experience = Math.Max(1, (bobberBar.fishQuality + 1) * 3 + (int)bobberBar.difficulty / 3);
             if (bobberBar.treasureCaught)
@@ -195,7 +199,8 @@ namespace FishSlapper.Vanilla
 
             if (bobberBar.bossFish)
                 experience *= 5;
-
+            if (flag)
+                experience*=10
             player.gainExperience(Farmer.fishingSkill, experience);
         }
 
