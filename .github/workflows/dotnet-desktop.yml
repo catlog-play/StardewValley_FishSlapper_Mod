@@ -1,0 +1,17 @@
+name: Build .NET Framework Application
+
+on: [push]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v2
+
+    - name: Add msbuild to PATH
+      uses: microsoft/setup-msbuild@v2
+
+    - name: Build app for release
+      run: msbuild FishSlapper/FishSlapper.csproj -t:rebuild -verbosity:diag -property:Configuration=Release
